@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest_tmp/
+pytest_tmp/
+pytest-cache-files-*/
+tests/_tmp/
+tmp/
+tmp2/
+_out/
+_audit_bundle.txt
