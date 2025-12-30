@@ -34,10 +34,23 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class LiveConfig:
+    out_dir: str
+    journal_filename: str
+    bybit_ws: str
+    bybit_depth: int
+    binance_ws: str
+    binance_rest: str
+    binance_depth: int
+    binance_depth_interval_ms: int
+
+
+@dataclass(frozen=True)
 class EngineConfig:
     symbols: SymbolsConfig
     thresholds: ThresholdsConfig
     risk: RiskConfig
+    live: LiveConfig | None = None
 
 
 def _require(data: dict, key: str) -> Any:
@@ -77,4 +90,18 @@ def load_config(path: str) -> EngineConfig:
 
     risk = RiskConfig(phases=phases)
 
-    return EngineConfig(symbols=symbols, thresholds=thresholds, risk=risk)
+    live_raw = raw.get("live", {}) or {}
+    out_dir = str(live_raw.get("out_dir", "_out/live"))
+    journal_filename = str(live_raw.get("journal_filename", f"{symbols.leader.lower()}_live.jsonl"))
+    live = LiveConfig(
+        out_dir=out_dir,
+        journal_filename=journal_filename,
+        bybit_ws=str(live_raw.get("bybit_ws", "wss://stream.bybit.com/v5/public/spot")),
+        bybit_depth=int(live_raw.get("bybit_depth", 50)),
+        binance_ws=str(live_raw.get("binance_ws", "wss://stream.binance.com:9443/ws")),
+        binance_rest=str(live_raw.get("binance_rest", "https://api.binance.com/api/v3/depth")),
+        binance_depth=int(live_raw.get("binance_depth", 50)),
+        binance_depth_interval_ms=int(live_raw.get("binance_depth_interval_ms", 100)),
+    )
+
+    return EngineConfig(symbols=symbols, thresholds=thresholds, risk=risk, live=live)

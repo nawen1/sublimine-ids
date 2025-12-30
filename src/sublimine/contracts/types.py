@@ -20,6 +20,7 @@ class EventType(str, Enum):
     TRADE = "TRADE"
     FEATURE = "FEATURE"
     EVENT_SIGNAL = "EVENT_SIGNAL"
+    TRADE_INTENT = "TRADE_INTENT"
 
 
 class Side(str, Enum):

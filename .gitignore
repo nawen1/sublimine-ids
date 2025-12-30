@@ -10,3 +10,6 @@ tmp/
 tmp2/
 _out/
 _audit_bundle.txt
+
+*.egg-info/
+

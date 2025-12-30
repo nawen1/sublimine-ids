@@ -24,3 +24,12 @@ risk_phases:
   F4:
     risk_frac: 0.0040
     max_daily_loss: 0.0200
+live:
+  out_dir: _out/live
+  journal_filename: btc_live.jsonl
+  bybit_ws: wss://stream.bybit.com/v5/public/spot
+  bybit_depth: 50
+  binance_ws: wss://stream.binance.com:9443/ws
+  binance_rest: https://api.binance.com/api/v3/depth
+  binance_depth: 50
+  binance_depth_interval_ms: 100

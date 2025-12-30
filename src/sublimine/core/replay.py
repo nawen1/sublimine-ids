@@ -8,11 +8,14 @@ from sublimine.core.journal import iter_events
 
 
 class ReplayEngine:
-    def __init__(self, bus: EventBus) -> None:
+    def __init__(self, bus: EventBus, event_filter: set[EventType] | None = None) -> None:
         self._bus = bus
+        self._event_filter = event_filter
 
     def run(self, path: str) -> None:
         for event_type, payload in iter_events(path):
+            if self._event_filter is not None and event_type not in self._event_filter:
+                continue
             self._bus.publish(event_type, payload)
 
 

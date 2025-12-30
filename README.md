@@ -16,13 +16,22 @@ CFDs do not expose a real limit order book. We therefore ingest real L2 + trades
 python -m sublimine.run --mode shadow --config config/sublimine.yaml --replay tests/data/replay.jsonl
 ```
 
+## Run (shadow-live)
+
+```
+python -m sublimine.run --mode shadow-live --config config/sublimine.yaml
+```
+
+- Journals to `_out/live/YYYYMMDD-HHMMSS/btc_live.jsonl` (configurable via `live.out_dir` + `live.journal_filename`).
+- Replay recorded logs via `--mode replay --replay <path>` (raw feed events only; derived events are recorded for audit).
+
 ## Tests
 
 ```
 pytest -q
 ```
 
-## Architecture (phase 1)
+## Architecture (phase 2)
 
 - `contracts/`: strict dataclasses/enums
 - `feeds/`: Bybit/Binance parsing + order book apply
@@ -32,6 +41,7 @@ pytest -q
 - `strategy/`: BTC playbook skeleton
 - `risk/`: phase ladder + gates
 - `exec/`: MT5 adapter stub + router (shadow)
+- `live`: streaming runner + Bybit/Binance connectors (shadow)
 
 ## Bybit/Binance book logic
 
@@ -47,6 +57,5 @@ pytest -q
 
 ## Next steps
 
-- Live Bybit/Binance websockets + journaling for real-time shadow mode.
 - IBKR L2 for NQ/GC futures and MT5 execution adapter implementation.
 - Expand playbooks and risk gates after live replay validation.

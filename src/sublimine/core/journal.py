@@ -18,6 +18,7 @@ from sublimine.contracts.types import (
     TradePrint,
     Venue,
 )
+from sublimine.features.feature_engine import FeatureFrame
 
 
 def _encode_value(value: Any) -> Any:
@@ -51,6 +52,27 @@ def _decode_book_levels(raw: list[dict]) -> list[BookLevel]:
 
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _decode_feature_frame(data: dict) -> FeatureFrame:
+    return FeatureFrame(
+        symbol=data["symbol"],
+        venue=Venue(data["venue"]),
+        ts_utc=_parse_datetime(data["ts_utc"]),
+        depth_near=float(data["depth_near"]),
+        microprice_bias=float(data["microprice_bias"]),
+        ofi_z=float(data["ofi_z"]),
+        delta_size=float(data["delta_size"]),
+        price_progress=float(data["price_progress"]),
+        replenishment=float(data["replenishment"]),
+        sweep_distance=float(data["sweep_distance"]),
+        return_speed=float(data["return_speed"]),
+        post_sweep_absorption=float(data["post_sweep_absorption"]),
+        basis_z=float(data["basis_z"]),
+        lead_lag=float(data["lead_lag"]),
+        microprice=float(data["microprice"]),
+        mid=float(data["mid"]),
+    )
 
 
 def decode_record(record: dict) -> tuple[EventType, Any]:
@@ -104,7 +126,17 @@ def decode_record(record: dict) -> tuple[EventType, Any]:
             meta=dict(data.get("meta", {})),
         )
     elif event_type == EventType.FEATURE:
-        payload = data
+        payload = _decode_feature_frame(data)
+    elif event_type == EventType.TRADE_INTENT:
+        payload = TradeIntent(
+            symbol=data["symbol"],
+            direction=Side(data["direction"]),
+            score=float(data["score"]),
+            risk_frac=float(data["risk_frac"]),
+            entry_plan=dict(data.get("entry_plan", {})),
+            stop_plan=dict(data.get("stop_plan", {})),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+        )
     else:
         payload = data
     return event_type, payload
@@ -113,12 +145,18 @@ def decode_record(record: dict) -> tuple[EventType, Any]:
 class JournalWriter:
     def __init__(self, path: str) -> None:
         self._path = path
+        self._handle = open(self._path, "a", encoding="utf-8")
 
     def append(self, event_type: EventType, payload: Any) -> None:
         record = encode_record(event_type, payload)
         line = json.dumps(record, separators=(",", ":"))
-        with open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        self._handle.write(line + "\n")
+        self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle:
+            self._handle.close()
+            self._handle = None
 
 
 def iter_records(path: str) -> Iterable[dict]:
