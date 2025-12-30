@@ -1,0 +1,26 @@
+symbols:
+  leader: BTCUSDT
+  exec: BTCUSD_CFD
+thresholds:
+  window: 50
+  depth_k: 5
+  quantile_high: 0.9
+  quantile_low: 0.1
+  min_samples: 20
+  signal_score_min: 0.2
+risk_phases:
+  F0:
+    risk_frac: 0.0020
+    max_daily_loss: 0.0100
+  F1:
+    risk_frac: 0.0025
+    max_daily_loss: 0.0125
+  F2:
+    risk_frac: 0.0030
+    max_daily_loss: 0.0150
+  F3:
+    risk_frac: 0.0035
+    max_daily_loss: 0.0175
+  F4:
+    risk_frac: 0.0040
+    max_daily_loss: 0.0200
