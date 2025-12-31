@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sublimine.config import EngineConfig, RiskConfig, RiskPhaseConfig, SymbolsConfig, ThresholdsConfig
-from sublimine.contracts.types import BookDelta, BookLevel, BookSnapshot, EventType, Venue
+from sublimine.contracts.types import EventType, SignalEvent, Side, TradePrint, Venue
 from sublimine.core.bus import EventBus
 from sublimine.core.replay import replay_events
 from sublimine.run import build_pipeline
@@ -17,42 +17,53 @@ def test_replay_pipeline_triggers_intent():
             quantile_low=0.4,
             min_samples=2,
             signal_score_min=0.1,
+            consensus_window_ms=750,
+            max_stale_ms=2000,
         ),
         risk=RiskConfig(phases={"F0": RiskPhaseConfig(risk_frac=0.002, max_daily_loss=0.01)}),
     )
 
     ts0 = datetime(2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-    snapshot = BookSnapshot(
+    trade_bybit = TradePrint(
         symbol="BTCUSDT",
         venue=Venue.BYBIT,
         ts_utc=ts0,
-        bids=[BookLevel(100.0, 5.0)],
-        asks=[BookLevel(101.0, 5.0)],
-        depth=1,
+        price=100.0,
+        size=0.1,
+        aggressor_side=Side.BUY,
     )
-    delta1 = BookDelta(
+    trade_binance = TradePrint(
         symbol="BTCUSDT",
-        venue=Venue.BYBIT,
+        venue=Venue.BINANCE,
         ts_utc=ts0,
-        bids=[BookLevel(100.0, 4.0)],
-        asks=[BookLevel(101.0, 4.0)],
-        is_snapshot=False,
-        update_id=2,
+        price=100.1,
+        size=0.2,
+        aggressor_side=Side.BUY,
     )
-    delta2 = BookDelta(
+    signal_bybit = SignalEvent(
+        event_name="E1",
         symbol="BTCUSDT",
         venue=Venue.BYBIT,
         ts_utc=ts0,
-        bids=[BookLevel(100.0, 1.5)],
-        asks=[BookLevel(101.0, 0.5)],
-        is_snapshot=False,
-        update_id=3,
+        score_0_1=0.8,
+        reason_codes=[],
+        meta={},
+    )
+    signal_binance = SignalEvent(
+        event_name="E1",
+        symbol="BTCUSDT",
+        venue=Venue.BINANCE,
+        ts_utc=ts0,
+        score_0_1=0.8,
+        reason_codes=[],
+        meta={},
     )
 
     events = [
-        (EventType.BOOK_SNAPSHOT, snapshot),
-        (EventType.BOOK_DELTA, delta1),
-        (EventType.BOOK_DELTA, delta2),
+        (EventType.TRADE, trade_bybit),
+        (EventType.TRADE, trade_binance),
+        (EventType.EVENT_SIGNAL, signal_bybit),
+        (EventType.EVENT_SIGNAL, signal_binance),
     ]
 
     bus = EventBus()

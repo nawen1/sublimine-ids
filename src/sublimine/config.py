@@ -20,6 +20,8 @@ class ThresholdsConfig:
     quantile_low: float
     min_samples: int
     signal_score_min: float
+    consensus_window_ms: int
+    max_stale_ms: int
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class RiskPhaseConfig:
 @dataclass(frozen=True)
 class RiskConfig:
     phases: dict[str, RiskPhaseConfig]
+    active_phase: str = "F0"
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,8 @@ def load_config(path: str) -> EngineConfig:
         quantile_low=float(_require(thresholds_raw, "quantile_low")),
         min_samples=int(_require(thresholds_raw, "min_samples")),
         signal_score_min=float(_require(thresholds_raw, "signal_score_min")),
+        consensus_window_ms=int(thresholds_raw.get("consensus_window_ms", 750)),
+        max_stale_ms=int(thresholds_raw.get("max_stale_ms", 2000)),
     )
 
     phases = {}
@@ -88,7 +93,8 @@ def load_config(path: str) -> EngineConfig:
             max_daily_loss=float(_require(values, "max_daily_loss")),
         )
 
-    risk = RiskConfig(phases=phases)
+    active_phase = str(raw.get("risk", {}).get("active_phase", "F0"))
+    risk = RiskConfig(phases=phases, active_phase=active_phase)
 
     live_raw = raw.get("live", {}) or {}
     out_dir = str(live_raw.get("out_dir", "_out/live"))

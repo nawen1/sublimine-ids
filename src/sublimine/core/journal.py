@@ -136,6 +136,8 @@ def decode_record(record: dict) -> tuple[EventType, Any]:
             entry_plan=dict(data.get("entry_plan", {})),
             stop_plan=dict(data.get("stop_plan", {})),
             ts_utc=_parse_datetime(data["ts_utc"]),
+            reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
         )
     else:
         payload = data

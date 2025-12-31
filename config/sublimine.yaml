@@ -8,6 +8,10 @@ thresholds:
   quantile_low: 0.1
   min_samples: 20
   signal_score_min: 0.2
+  consensus_window_ms: 750
+  max_stale_ms: 2000
+risk:
+  active_phase: F0
 risk_phases:
   F0:
     risk_frac: 0.0020

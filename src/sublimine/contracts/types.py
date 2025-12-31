@@ -96,3 +96,5 @@ class TradeIntent:
     entry_plan: dict
     stop_plan: dict
     ts_utc: datetime
+    reason_codes: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
