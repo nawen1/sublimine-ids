@@ -94,6 +94,11 @@ def load_config(path: str) -> EngineConfig:
         )
 
     active_phase = str(raw.get("risk", {}).get("active_phase", "F0"))
+    if active_phase not in phases:
+        if "F0" in phases:
+            active_phase = "F0"
+        elif phases:
+            active_phase = sorted(phases.keys())[0]
     risk = RiskConfig(phases=phases, active_phase=active_phase)
 
     live_raw = raw.get("live", {}) or {}

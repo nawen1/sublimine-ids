@@ -1,0 +1,1636 @@
+===== BEGIN config/sublimine.yaml =====
+symbols:
+  leader: BTCUSDT
+  exec: BTCUSD_CFD
+thresholds:
+  window: 50
+  depth_k: 5
+  quantile_high: 0.9
+  quantile_low: 0.1
+  min_samples: 20
+  signal_score_min: 0.2
+  consensus_window_ms: 750
+  max_stale_ms: 2000
+risk:
+  active_phase: F0
+risk_phases:
+  F0:
+    risk_frac: 0.0020
+    max_daily_loss: 0.0100
+  F1:
+    risk_frac: 0.0025
+    max_daily_loss: 0.0125
+  F2:
+    risk_frac: 0.0030
+    max_daily_loss: 0.0150
+  F3:
+    risk_frac: 0.0035
+    max_daily_loss: 0.0175
+  F4:
+    risk_frac: 0.0040
+    max_daily_loss: 0.0200
+live:
+  out_dir: _out/live
+  journal_filename: btc_live.jsonl
+  bybit_ws: wss://stream.bybit.com/v5/public/spot
+  bybit_depth: 50
+  binance_ws: wss://stream.binance.com:9443/ws
+  binance_rest: https://api.binance.com/api/v3/depth
+  binance_depth: 50
+  binance_depth_interval_ms: 100
+
+===== END config/sublimine.yaml =====
+
+===== BEGIN src/sublimine/config.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import yaml
+
+
+@dataclass(frozen=True)
+class SymbolsConfig:
+    leader: str
+    exec_symbol: str
+
+
+@dataclass(frozen=True)
+class ThresholdsConfig:
+    window: int
+    depth_k: int
+    quantile_high: float
+    quantile_low: float
+    min_samples: int
+    signal_score_min: float
+    consensus_window_ms: int
+    max_stale_ms: int
+
+
+@dataclass(frozen=True)
+class RiskPhaseConfig:
+    risk_frac: float
+    max_daily_loss: float
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    phases: dict[str, RiskPhaseConfig]
+    active_phase: str = "F0"
+
+
+@dataclass(frozen=True)
+class LiveConfig:
+    out_dir: str
+    journal_filename: str
+    bybit_ws: str
+    bybit_depth: int
+    binance_ws: str
+    binance_rest: str
+    binance_depth: int
+    binance_depth_interval_ms: int
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    symbols: SymbolsConfig
+    thresholds: ThresholdsConfig
+    risk: RiskConfig
+    live: LiveConfig | None = None
+
+
+def _require(data: dict, key: str) -> Any:
+    if key not in data:
+        raise KeyError(f"Missing config key: {key}")
+    return data[key]
+
+
+def load_config(path: str) -> EngineConfig:
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+
+    symbols_raw = _require(raw, "symbols")
+    thresholds_raw = _require(raw, "thresholds")
+    risk_raw = _require(raw, "risk_phases")
+
+    symbols = SymbolsConfig(
+        leader=str(_require(symbols_raw, "leader")),
+        exec_symbol=str(_require(symbols_raw, "exec")),
+    )
+
+    thresholds = ThresholdsConfig(
+        window=int(_require(thresholds_raw, "window")),
+        depth_k=int(_require(thresholds_raw, "depth_k")),
+        quantile_high=float(_require(thresholds_raw, "quantile_high")),
+        quantile_low=float(_require(thresholds_raw, "quantile_low")),
+        min_samples=int(_require(thresholds_raw, "min_samples")),
+        signal_score_min=float(_require(thresholds_raw, "signal_score_min")),
+        consensus_window_ms=int(thresholds_raw.get("consensus_window_ms", 750)),
+        max_stale_ms=int(thresholds_raw.get("max_stale_ms", 2000)),
+    )
+
+    phases = {}
+    for name, values in risk_raw.items():
+        phases[str(name)] = RiskPhaseConfig(
+            risk_frac=float(_require(values, "risk_frac")),
+            max_daily_loss=float(_require(values, "max_daily_loss")),
+        )
+
+    active_phase = str(raw.get("risk", {}).get("active_phase", "F0"))
+    risk = RiskConfig(phases=phases, active_phase=active_phase)
+
+    live_raw = raw.get("live", {}) or {}
+    out_dir = str(live_raw.get("out_dir", "_out/live"))
+    journal_filename = str(live_raw.get("journal_filename", f"{symbols.leader.lower()}_live.jsonl"))
+    live = LiveConfig(
+        out_dir=out_dir,
+        journal_filename=journal_filename,
+        bybit_ws=str(live_raw.get("bybit_ws", "wss://stream.bybit.com/v5/public/spot")),
+        bybit_depth=int(live_raw.get("bybit_depth", 50)),
+        binance_ws=str(live_raw.get("binance_ws", "wss://stream.binance.com:9443/ws")),
+        binance_rest=str(live_raw.get("binance_rest", "https://api.binance.com/api/v3/depth")),
+        binance_depth=int(live_raw.get("binance_depth", 50)),
+        binance_depth_interval_ms=int(live_raw.get("binance_depth_interval_ms", 100)),
+    )
+
+    return EngineConfig(symbols=symbols, thresholds=thresholds, risk=risk, live=live)
+
+===== END src/sublimine/config.py =====
+
+===== BEGIN src/sublimine/run.py =====
+from __future__ import annotations
+
+import argparse
+import os
+from datetime import datetime
+from dataclasses import replace
+from math import sqrt
+from pathlib import Path
+
+from sublimine.config import EngineConfig, LiveConfig, load_config
+from sublimine.contracts.types import EventType, SignalEvent, Venue
+from sublimine.core.bus import EventBus
+from sublimine.core.clock import utc_now
+from sublimine.core.journal import JournalWriter
+from sublimine.core.replay import ReplayEngine
+from sublimine.exec.mt5_adapter import MockMT5Adapter
+from sublimine.exec.router import OrderRouter
+from sublimine.features import FeatureEngine, FeatureFrame
+from sublimine.feeds.binance_ws import BinanceConnector
+from sublimine.feeds.bybit_ws import BybitConnector
+from sublimine.live import LiveRunner
+from sublimine.risk.gates import RiskGates
+from sublimine.strategy.playbooks import BTCPlaybook
+from sublimine.events.detectors import DetectorConfig, DetectorEngine
+
+
+def build_pipeline(
+    bus: EventBus,
+    config_path: str | None = None,
+    config: EngineConfig | None = None,
+    shadow: bool = True,
+) -> dict:
+    if config is None:
+        if config_path is None:
+            raise ValueError("config_path or config must be provided")
+        config = load_config(config_path)
+    feature_engines: dict[Venue, FeatureEngine] = {}
+    detectors: dict[Venue, DetectorEngine] = {}
+    playbook = BTCPlaybook()
+    risk_gates = RiskGates()
+    router = OrderRouter(adapter=MockMT5Adapter(), shadow=shadow)
+    intents: list = []
+    latest_signals: dict[Venue, SignalEvent] = {}
+    last_book_ts: dict[Venue, datetime] = {}
+    last_trade_ts: dict[Venue, datetime] = {}
+
+    def _feature_engine_for(venue: Venue) -> FeatureEngine:
+        engine = feature_engines.get(venue)
+        if engine is None:
+            engine = FeatureEngine(
+                symbol=config.symbols.leader,
+                depth_k=config.thresholds.depth_k,
+                window=config.thresholds.window,
+            )
+            feature_engines[venue] = engine
+        return engine
+
+    def _detector_for(venue: Venue) -> DetectorEngine:
+        detector = detectors.get(venue)
+        if detector is None:
+            detector = DetectorEngine(
+                DetectorConfig(
+                    window=config.thresholds.window,
+                    quantile_high=config.thresholds.quantile_high,
+                    quantile_low=config.thresholds.quantile_low,
+                    min_samples=config.thresholds.min_samples,
+                )
+            )
+            detectors[venue] = detector
+        return detector
+
+    def on_snapshot(snapshot) -> None:
+        last_book_ts[snapshot.venue] = snapshot.ts_utc
+        features = _feature_engine_for(snapshot.venue).on_book_snapshot(snapshot)
+        if features:
+            bus.publish(EventType.FEATURE, features)
+
+    def on_delta(delta) -> None:
+        last_book_ts[delta.venue] = delta.ts_utc
+        features = _feature_engine_for(delta.venue).on_book_delta(delta)
+        if features:
+            bus.publish(EventType.FEATURE, features)
+
+    def on_trade(trade) -> None:
+        last_trade_ts[trade.venue] = trade.ts_utc
+        _feature_engine_for(trade.venue).on_trade(trade)
+
+    def on_features(features: FeatureFrame) -> None:
+        detector = _detector_for(features.venue)
+        for signal in detector.evaluate(features):
+            bus.publish(EventType.EVENT_SIGNAL, signal)
+
+    def _last_seen_ts(venue: Venue) -> datetime | None:
+        book_ts = last_book_ts.get(venue)
+        trade_ts = last_trade_ts.get(venue)
+        if book_ts is not None and trade_ts is not None:
+            return max(book_ts, trade_ts)
+        return book_ts or trade_ts
+
+    def _stale_venues(ref_ts: datetime) -> list[Venue]:
+        stale: list[Venue] = []
+        for venue in (Venue.BYBIT, Venue.BINANCE):
+            last_ts = _last_seen_ts(venue)
+            if last_ts is None:
+                stale.append(venue)
+                continue
+            age_ms = max((ref_ts - last_ts).total_seconds() * 1000.0, 0.0)
+            if age_ms > config.thresholds.max_stale_ms:
+                stale.append(venue)
+        return stale
+
+    def on_signal(signal: SignalEvent) -> None:
+        if "stale_feed_block" in signal.reason_codes:
+            return
+        if signal.venue not in (Venue.BYBIT, Venue.BINANCE):
+            return
+
+        latest_signals[signal.venue] = signal
+        other_venue = Venue.BINANCE if signal.venue == Venue.BYBIT else Venue.BYBIT
+        other = latest_signals.get(other_venue)
+        if other is None:
+            return
+        if other.event_name != signal.event_name or other.symbol != signal.symbol:
+            return
+        dt_ms = abs((signal.ts_utc - other.ts_utc).total_seconds() * 1000.0)
+        if dt_ms > config.thresholds.consensus_window_ms:
+            return
+        combined_score = sqrt(max(signal.score_0_1, 0.0) * max(other.score_0_1, 0.0))
+        if combined_score < config.thresholds.signal_score_min:
+            return
+
+        ref_ts = signal.ts_utc if signal.ts_utc >= other.ts_utc else other.ts_utc
+        stale = _stale_venues(ref_ts)
+        if stale:
+            blocked = SignalEvent(
+                event_name=signal.event_name,
+                symbol=signal.symbol,
+                venue=signal.venue,
+                ts_utc=ref_ts,
+                score_0_1=combined_score,
+                reason_codes=list(signal.reason_codes) + ["stale_feed_block"],
+                meta={
+                    "stale_venues": [venue.value for venue in stale],
+                    "max_stale_ms": config.thresholds.max_stale_ms,
+                    "consensus_dt_ms": dt_ms,
+                },
+            )
+            bus.publish(EventType.EVENT_SIGNAL, blocked)
+            return
+
+        consensus_signal = SignalEvent(
+            event_name=signal.event_name,
+            symbol=signal.symbol,
+            venue=signal.venue,
+            ts_utc=ref_ts,
+            score_0_1=combined_score,
+            reason_codes=list(signal.reason_codes) + ["consensus_confirmed"],
+            meta=dict(signal.meta),
+        )
+        active_phase = config.risk.active_phase
+        risk_frac = config.risk.phases[active_phase].risk_frac
+        intent = playbook.on_signal(consensus_signal, risk_frac)
+        if intent is None:
+            return
+        if not risk_gates.allow_trade(intent.ts_utc):
+            return
+        risk_gates.record_trade(intent.ts_utc)
+        intent = replace(
+            intent,
+            score=combined_score,
+            risk_frac=risk_frac,
+            reason_codes=["consensus_confirmed"],
+            meta={
+                "venues": [signal.venue.value, other.venue.value],
+                "scores": {signal.venue.value: signal.score_0_1, other.venue.value: other.score_0_1},
+                "consensus_dt_ms": dt_ms,
+            },
+        )
+        router.submit(intent)
+        intents.append(intent)
+        bus.publish(EventType.TRADE_INTENT, intent)
+
+    bus.subscribe(EventType.BOOK_SNAPSHOT, on_snapshot)
+    bus.subscribe(EventType.BOOK_DELTA, on_delta)
+    bus.subscribe(EventType.TRADE, on_trade)
+    bus.subscribe(EventType.FEATURE, on_features)
+    bus.subscribe(EventType.EVENT_SIGNAL, on_signal)
+
+    return {"config": config, "intents": intents}
+
+
+def _attach_journal(bus: EventBus, writer: JournalWriter) -> None:
+    def _record(event_type: EventType):
+        def _handler(payload: object) -> None:
+            writer.append(event_type, payload)
+
+        return _handler
+
+    for event_type in (
+        EventType.BOOK_SNAPSHOT,
+        EventType.BOOK_DELTA,
+        EventType.TRADE,
+        EventType.FEATURE,
+        EventType.EVENT_SIGNAL,
+        EventType.TRADE_INTENT,
+    ):
+        bus.subscribe(event_type, _record(event_type))
+
+
+def _live_journal_path(config: EngineConfig) -> str:
+    live = _require_live_config(config.live)
+    ts = utc_now()
+    out_dir = Path(live.out_dir) / ts.strftime("%Y%m%d-%H%M%S")
+    return str(out_dir / live.journal_filename)
+
+
+def _require_live_config(live: LiveConfig | None) -> LiveConfig:
+    if live is None:
+        raise ValueError("Live configuration is required for shadow-live mode")
+    return live
+
+
+def _allow_live_mode(env: dict[str, str] | None = None) -> bool:
+    env = dict(os.environ) if env is None else env
+    return "PYTEST_CURRENT_TEST" not in env
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SUBLIMINE IDS v2.1")
+    parser.add_argument("--mode", choices=["shadow", "replay", "shadow-live"], default="shadow")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--replay")
+    args = parser.parse_args()
+
+    if args.mode in {"shadow", "replay"}:
+        if not args.replay:
+            parser.error("--replay is required for shadow/replay mode")
+        bus = EventBus()
+        pipeline_state = build_pipeline(bus, config_path=args.config, shadow=True)
+        replay = ReplayEngine(
+            bus,
+            event_filter={EventType.BOOK_SNAPSHOT, EventType.BOOK_DELTA, EventType.TRADE, EventType.QUOTE},
+        )
+        replay.run(args.replay)
+        print(f"Replay complete. Trade intents: {len(pipeline_state['intents'])}")
+        return
+
+    if not _allow_live_mode():
+        raise RuntimeError("shadow-live mode is disabled under pytest")
+
+    bus = EventBus()
+    pipeline_state = build_pipeline(bus, config_path=args.config, shadow=True)
+    config = pipeline_state["config"]
+    live = _require_live_config(config.live)
+    journal_path = _live_journal_path(config)
+    Path(journal_path).parent.mkdir(parents=True, exist_ok=True)
+    writer = JournalWriter(journal_path)
+    _attach_journal(bus, writer)
+    connectors = [
+        BybitConnector(symbol=config.symbols.leader, depth=live.bybit_depth, ws_url=live.bybit_ws),
+        BinanceConnector(
+            symbol=config.symbols.leader,
+            depth=live.binance_depth,
+            depth_interval_ms=live.binance_depth_interval_ms,
+            ws_url=live.binance_ws,
+            rest_url=live.binance_rest,
+        ),
+    ]
+    runner = LiveRunner(bus, connectors)
+    try:
+        runner.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        writer.close()
+
+
+if __name__ == "__main__":
+    main()
+
+===== END src/sublimine/run.py =====
+
+===== BEGIN src/sublimine/live.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+import queue
+import threading
+from typing import Callable, Iterable
+
+from sublimine.contracts.types import EventType
+from sublimine.core.bus import EventBus
+
+
+EventSink = Callable[[EventType, object], None]
+
+
+@dataclass(frozen=True)
+class LiveEvent:
+    event_type: EventType
+    payload: object
+
+
+class LiveRunner:
+    def __init__(self, bus: EventBus, connectors: Iterable[object]) -> None:
+        self._bus = bus
+        self._connectors = list(connectors)
+        self._queue: queue.Queue[LiveEvent] = queue.Queue()
+        self._stop_event = threading.Event()
+
+    @property
+    def sink(self) -> EventSink:
+        def _sink(event_type: EventType, payload: object) -> None:
+            self._queue.put(LiveEvent(event_type=event_type, payload=payload))
+
+        return _sink
+
+    def run(self) -> None:
+        for connector in self._connectors:
+            connector.start(self.sink)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    event = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                self._bus.publish(event.event_type, event.payload)
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        for connector in self._connectors:
+            connector.stop()
+        for connector in self._connectors:
+            connector.join()
+
+===== END src/sublimine/live.py =====
+
+===== BEGIN src/sublimine/feeds/ws_common.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ReconnectPolicy:
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+    factor: float = 2.0
+    _attempts: int = 0
+
+    def next_delay(self) -> float:
+        delay = min(self.base_delay * (self.factor**self._attempts), self.max_delay)
+        self._attempts += 1
+        return delay
+
+    def reset(self) -> None:
+        self._attempts = 0
+
+===== END src/sublimine/feeds/ws_common.py =====
+
+===== BEGIN src/sublimine/feeds/bybit_ws.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+import threading
+import time
+from typing import Any, Callable
+
+try:
+    import websocket  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in live environments
+    websocket = None
+
+from sublimine.contracts.types import BookDelta, BookLevel, BookSnapshot, EventType, Side, TradePrint, Venue
+from sublimine.feeds.book import OrderBook
+from sublimine.feeds.ws_common import ReconnectPolicy
+
+
+def _parse_levels(raw_levels: list[list[Any]]) -> list[BookLevel]:
+    levels: list[BookLevel] = []
+    for price, size in raw_levels:
+        levels.append(BookLevel(price=float(price), size=float(size)))
+    return levels
+
+
+def _ts_from_ms(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+
+
+def parse_bybit_message(msg: dict) -> BookSnapshot | BookDelta | None:
+    topic = msg.get("topic")
+    if topic is None or not str(topic).startswith("orderbook."):
+        return None
+    msg_type = msg.get("type")
+    data = msg.get("data") or {}
+    if msg_type not in {"snapshot", "delta"}:
+        return None
+
+    symbol = data.get("s")
+    if symbol is None:
+        return None
+
+    ts_ms = msg.get("ts")
+    if ts_ms is None:
+        return None
+
+    bids = _parse_levels(data.get("b", []))
+    asks = _parse_levels(data.get("a", []))
+    update_id = data.get("u")
+
+    if msg_type == "snapshot":
+        depth = int(data.get("depth", max(len(bids), len(asks))))
+        return BookSnapshot(
+            symbol=symbol,
+            venue=Venue.BYBIT,
+            ts_utc=_ts_from_ms(int(ts_ms)),
+            bids=bids,
+            asks=asks,
+            depth=depth,
+        )
+
+    is_snapshot = bool(update_id == 1)
+    return BookDelta(
+        symbol=symbol,
+        venue=Venue.BYBIT,
+        ts_utc=_ts_from_ms(int(ts_ms)),
+        bids=bids,
+        asks=asks,
+        is_snapshot=is_snapshot,
+        update_id=int(update_id) if update_id is not None else None,
+    )
+
+def parse_bybit_trade_message(msg: dict) -> list[TradePrint] | None:
+    topic = msg.get("topic")
+    if topic is None or not str(topic).startswith("publicTrade."):
+        return None
+    raw = msg.get("data")
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        raw_trades = [raw]
+    else:
+        raw_trades = list(raw)
+
+    trades: list[TradePrint] = []
+    for item in raw_trades:
+        symbol = item.get("s")
+        if symbol is None:
+            continue
+        ts_ms = item.get("T") or msg.get("ts")
+        if ts_ms is None:
+            continue
+        price_raw = item.get("p")
+        size_raw = item.get("v") or item.get("q")
+        if price_raw is None or size_raw is None:
+            continue
+        side_raw = str(item.get("S", "")).lower()
+        if side_raw == "buy":
+            side = Side.BUY
+        elif side_raw == "sell":
+            side = Side.SELL
+        else:
+            side = Side.UNKNOWN
+        trades.append(
+            TradePrint(
+                symbol=symbol,
+                venue=Venue.BYBIT,
+                ts_utc=_ts_from_ms(int(ts_ms)),
+                price=float(price_raw),
+                size=float(size_raw),
+                aggressor_side=side,
+            )
+        )
+    return trades
+
+
+EventSink = Callable[[EventType, object], None]
+
+
+@dataclass
+class BybitConnector:
+    symbol: str
+    depth: int
+    ws_url: str
+    reconnect: ReconnectPolicy = field(default_factory=ReconnectPolicy)
+    ping_interval: int = 20
+    ping_timeout: int = 10
+    _book: OrderBook = field(init=False)
+    _stop_event: threading.Event = field(init=False, default_factory=threading.Event)
+    _thread: threading.Thread | None = field(init=False, default=None)
+    _ws: websocket.WebSocketApp | None = field(init=False, default=None)
+    _sink: EventSink | None = field(init=False, default=None)
+
+    def start(self, sink: EventSink) -> None:
+        if websocket is None:
+            raise RuntimeError("websocket-client is required for live Bybit feeds")
+        self._sink = sink
+        self._book = OrderBook.empty(self.symbol, Venue.BYBIT, self.depth)
+        self._thread = threading.Thread(target=self._run, name="bybit-ws", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._ws is not None:
+            self._ws.close()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+            )
+            self._ws.run_forever(ping_interval=self.ping_interval, ping_timeout=self.ping_timeout)
+            if self._stop_event.is_set():
+                break
+            time.sleep(self.reconnect.next_delay())
+
+    def _on_open(self, ws: websocket.WebSocketApp) -> None:
+        self.reconnect.reset()
+        self._book = OrderBook.empty(self.symbol, Venue.BYBIT, self.depth)
+        args = [f"orderbook.{self.depth}.{self.symbol}", f"publicTrade.{self.symbol}"]
+        ws.send(json.dumps({"op": "subscribe", "args": args}, separators=(",", ":")))
+
+    def _on_message(self, _ws: websocket.WebSocketApp, message: str) -> None:
+        if self._sink is None:
+            return
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+
+        book_event = parse_bybit_message(payload)
+        if isinstance(book_event, BookSnapshot):
+            self._book.apply_snapshot(book_event)
+            self._sink(EventType.BOOK_SNAPSHOT, book_event)
+            return
+        if isinstance(book_event, BookDelta):
+            if book_event.is_snapshot:
+                snapshot = BookSnapshot(
+                    symbol=book_event.symbol,
+                    venue=book_event.venue,
+                    ts_utc=book_event.ts_utc,
+                    bids=book_event.bids,
+                    asks=book_event.asks,
+                    depth=self._book.depth,
+                )
+                self._book.apply_snapshot(snapshot)
+                self._sink(EventType.BOOK_SNAPSHOT, snapshot)
+            else:
+                self._book.apply_delta(book_event)
+                self._sink(EventType.BOOK_DELTA, book_event)
+            return
+
+        trades = parse_bybit_trade_message(payload)
+        if trades is None:
+            return
+        for trade in trades:
+            self._sink(EventType.TRADE, trade)
+
+    def _on_error(self, _ws: websocket.WebSocketApp, _error: object) -> None:
+        return None
+
+    def _on_close(self, _ws: websocket.WebSocketApp, _status: object, _msg: object) -> None:
+        return None
+
+===== END src/sublimine/feeds/bybit_ws.py =====
+
+===== BEGIN src/sublimine/feeds/binance_ws.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+import threading
+import time
+from typing import Any, Callable
+import urllib.parse
+import urllib.request
+
+try:
+    import websocket  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised in live environments
+    websocket = None
+
+from sublimine.contracts.types import BookDelta, BookLevel, BookSnapshot, EventType, Side, TradePrint, Venue
+from sublimine.feeds.book import OrderBook
+from sublimine.feeds.ws_common import ReconnectPolicy
+
+
+def _parse_levels(raw_levels: list[list[Any]]) -> list[BookLevel]:
+    levels: list[BookLevel] = []
+    for price, size in raw_levels:
+        levels.append(BookLevel(price=float(price), size=float(size)))
+    return levels
+
+
+def _ts_from_ms(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+
+
+@dataclass(frozen=True)
+class BinanceDiffEvent:
+    symbol: str
+    first_update_id: int
+    final_update_id: int
+    ts_utc: datetime
+    delta: BookDelta
+
+
+def parse_binance_diff_event(msg: dict) -> BinanceDiffEvent | None:
+    if msg.get("e") != "depthUpdate":
+        return None
+
+    symbol = msg.get("s")
+    if symbol is None:
+        return None
+
+    first_id = msg.get("U")
+    final_id = msg.get("u")
+    if first_id is None or final_id is None:
+        return None
+
+    bids = _parse_levels(msg.get("b", []))
+    asks = _parse_levels(msg.get("a", []))
+    ts_ms = msg.get("E")
+    ts_utc = _ts_from_ms(int(ts_ms)) if ts_ms is not None else datetime.fromtimestamp(0, tz=timezone.utc)
+
+    delta = BookDelta(
+        symbol=symbol,
+        venue=Venue.BINANCE,
+        ts_utc=ts_utc,
+        bids=bids,
+        asks=asks,
+        is_snapshot=False,
+        update_id=int(final_id),
+    )
+
+    return BinanceDiffEvent(
+        symbol=symbol,
+        first_update_id=int(first_id),
+        final_update_id=int(final_id),
+        ts_utc=ts_utc,
+        delta=delta,
+    )
+
+
+def parse_binance_trade_message(msg: dict) -> TradePrint | None:
+    if msg.get("e") != "trade":
+        return None
+    symbol = msg.get("s")
+    if symbol is None:
+        return None
+    price_raw = msg.get("p")
+    size_raw = msg.get("q")
+    ts_ms = msg.get("T") or msg.get("E")
+    if price_raw is None or size_raw is None or ts_ms is None:
+        return None
+    is_buyer_maker = bool(msg.get("m"))
+    side = Side.SELL if is_buyer_maker else Side.BUY
+    return TradePrint(
+        symbol=symbol,
+        venue=Venue.BINANCE,
+        ts_utc=_ts_from_ms(int(ts_ms)),
+        price=float(price_raw),
+        size=float(size_raw),
+        aggressor_side=side,
+    )
+
+
+def fetch_binance_snapshot(
+    symbol: str,
+    depth: int,
+    rest_url: str,
+    timeout_s: float = 10.0,
+) -> tuple[BookSnapshot, int]:
+    params = urllib.parse.urlencode({"symbol": symbol, "limit": depth})
+    joiner = "&" if "?" in rest_url else "?"
+    url = f"{rest_url}{joiner}{params}"
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    last_update_id = int(payload["lastUpdateId"])
+    bids = _parse_levels(payload.get("bids", []))
+    asks = _parse_levels(payload.get("asks", []))
+    snapshot = BookSnapshot(
+        symbol=symbol,
+        venue=Venue.BINANCE,
+        ts_utc=datetime.now(timezone.utc),
+        bids=bids,
+        asks=asks,
+        depth=depth,
+    )
+    return snapshot, last_update_id
+
+
+class BinanceBookSynchronizer:
+    def __init__(self, symbol: str, depth: int) -> None:
+        self._symbol = symbol
+        self._depth = depth
+        self._book = OrderBook.empty(symbol, Venue.BINANCE, depth)
+        self._last_update_id: int | None = None
+        self._buffer: list[BinanceDiffEvent] = []
+        self._synced = False
+        self.desynced = False
+
+    @property
+    def book(self) -> OrderBook:
+        return self._book
+
+    @property
+    def last_update_id(self) -> int | None:
+        return self._last_update_id
+
+    def apply_snapshot(self, snapshot: BookSnapshot, last_update_id: int) -> list[BookDelta]:
+        self._book.apply_snapshot(snapshot)
+        self._last_update_id = int(last_update_id)
+        self._synced = False
+        applied: list[BookDelta] = []
+        if self._buffer:
+            buffered = sorted(self._buffer, key=lambda item: item.final_update_id)
+            self._buffer.clear()
+            for event in buffered:
+                if self.desynced:
+                    break
+                if self.on_diff_event(event):
+                    applied.append(event.delta)
+        return applied
+
+    def on_diff_event(self, event: BinanceDiffEvent) -> bool:
+        if self._last_update_id is None:
+            self._buffer.append(event)
+            return False
+
+        if event.final_update_id < self._last_update_id:
+            return False
+
+        if not self._synced:
+            if not (event.first_update_id <= self._last_update_id <= event.final_update_id):
+                self.desynced = True
+                return False
+            self._synced = True
+        elif event.first_update_id != self._last_update_id + 1:
+            self.desynced = True
+            return False
+
+        self._book.apply_delta(event.delta)
+        self._last_update_id = event.final_update_id
+        return True
+
+    def needs_resync(self) -> bool:
+        return self.desynced
+
+    def reset_for_resync(self) -> None:
+        self._buffer.clear()
+        self._last_update_id = None
+        self._synced = False
+        self.desynced = False
+
+
+EventSink = Callable[[EventType, object], None]
+
+
+@dataclass
+class BinanceConnector:
+    symbol: str
+    depth: int
+    depth_interval_ms: int
+    ws_url: str
+    rest_url: str
+    reconnect: ReconnectPolicy = field(default_factory=ReconnectPolicy)
+    resync: ReconnectPolicy = field(default_factory=ReconnectPolicy)
+    ping_interval: int = 20
+    ping_timeout: int = 10
+    snapshot_fetcher: Callable[[str, int, str, float], tuple[BookSnapshot, int]] = fetch_binance_snapshot
+    _sync: BinanceBookSynchronizer = field(init=False)
+    _sink: EventSink | None = field(init=False, default=None)
+    _thread: threading.Thread | None = field(init=False, default=None)
+    _stop_event: threading.Event = field(init=False, default_factory=threading.Event)
+    _ws: websocket.WebSocketApp | None = field(init=False, default=None)
+    _sync_lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+    _resync_lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+
+    def __post_init__(self) -> None:
+        self._sync = BinanceBookSynchronizer(symbol=self.symbol, depth=self.depth)
+
+    def start(self, sink: EventSink) -> None:
+        if websocket is None:
+            raise RuntimeError("websocket-client is required for live Binance feeds")
+        self._sink = sink
+        self._thread = threading.Thread(target=self._run, name="binance-ws", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._ws is not None:
+            self._ws.close()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+            )
+            self._ws.run_forever(ping_interval=self.ping_interval, ping_timeout=self.ping_timeout)
+            if self._stop_event.is_set():
+                break
+            time.sleep(self.reconnect.next_delay())
+
+    def _on_open(self, ws: websocket.WebSocketApp) -> None:
+        self.reconnect.reset()
+        params = [
+            f"{self.symbol.lower()}@depth@{self.depth_interval_ms}ms",
+            f"{self.symbol.lower()}@trade",
+        ]
+        ws.send(json.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}, separators=(",", ":")))
+        self._request_resync()
+
+    def _on_message(self, _ws: websocket.WebSocketApp, message: str) -> None:
+        if self._sink is None:
+            return
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        data = payload.get("data", payload)
+        diff_event = parse_binance_diff_event(data)
+        if diff_event is not None:
+            self._handle_diff_event(diff_event)
+            return
+
+        trade = parse_binance_trade_message(data)
+        if trade is not None:
+            self._sink(EventType.TRADE, trade)
+
+    def _handle_diff_event(self, diff_event: BinanceDiffEvent) -> None:
+        if self._sink is None:
+            return
+        with self._sync_lock:
+            applied = self._sync.on_diff_event(diff_event)
+            needs_resync = self._sync.needs_resync()
+        if applied:
+            self._sink(EventType.BOOK_DELTA, diff_event.delta)
+        if needs_resync:
+            self._request_resync()
+
+    def _request_resync(self) -> None:
+        if self._stop_event.is_set():
+            return
+        if not self._resync_lock.acquire(blocking=False):
+            return
+        thread = threading.Thread(target=self._resync, name="binance-resync", daemon=True)
+        thread.start()
+
+    def _resync(self) -> None:
+        try:
+            with self._sync_lock:
+                self._sync.reset_for_resync()
+            snapshot, last_update_id = self._fetch_snapshot_with_backoff()
+            if self._stop_event.is_set():
+                return
+            with self._sync_lock:
+                buffered = self._sync.apply_snapshot(snapshot, last_update_id)
+            if self._sink is not None:
+                self._sink(EventType.BOOK_SNAPSHOT, snapshot)
+                for delta in buffered:
+                    self._sink(EventType.BOOK_DELTA, delta)
+        finally:
+            self._resync_lock.release()
+
+    def _fetch_snapshot_with_backoff(self) -> tuple[BookSnapshot, int]:
+        while not self._stop_event.is_set():
+            try:
+                snapshot, last_update_id = self.snapshot_fetcher(self.symbol, self.depth, self.rest_url, 10.0)
+            except Exception:
+                time.sleep(self.resync.next_delay())
+                continue
+            self.resync.reset()
+            return snapshot, last_update_id
+        return BookSnapshot(self.symbol, Venue.BINANCE, datetime.now(timezone.utc), [], [], self.depth), 0
+
+    def _on_error(self, _ws: websocket.WebSocketApp, _error: object) -> None:
+        return None
+
+    def _on_close(self, _ws: websocket.WebSocketApp, _status: object, _msg: object) -> None:
+        return None
+
+===== END src/sublimine/feeds/binance_ws.py =====
+
+===== BEGIN src/sublimine/core/journal.py =====
+from __future__ import annotations
+
+import json
+from dataclasses import fields, is_dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Any, Iterable
+
+from sublimine.contracts.types import (
+    BookDelta,
+    BookLevel,
+    BookSnapshot,
+    EventType,
+    QuoteTick,
+    SignalEvent,
+    Side,
+    TradeIntent,
+    TradePrint,
+    Venue,
+)
+from sublimine.features.feature_engine import FeatureFrame
+
+
+def _encode_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if is_dataclass(value):
+        return _encode_dataclass(value)
+    if isinstance(value, list):
+        return [_encode_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _encode_value(val) for key, val in value.items()}
+    return value
+
+
+def _encode_dataclass(obj: Any) -> dict:
+    return {field.name: _encode_value(getattr(obj, field.name)) for field in fields(obj)}
+
+
+def encode_record(event_type: EventType, payload: Any) -> dict:
+    return {
+        "event_type": event_type.value,
+        "data": _encode_value(payload),
+    }
+
+
+def _decode_book_levels(raw: list[dict]) -> list[BookLevel]:
+    return [BookLevel(price=float(item["price"]), size=float(item["size"])) for item in raw]
+
+
+def _parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def _decode_feature_frame(data: dict) -> FeatureFrame:
+    return FeatureFrame(
+        symbol=data["symbol"],
+        venue=Venue(data["venue"]),
+        ts_utc=_parse_datetime(data["ts_utc"]),
+        depth_near=float(data["depth_near"]),
+        microprice_bias=float(data["microprice_bias"]),
+        ofi_z=float(data["ofi_z"]),
+        delta_size=float(data["delta_size"]),
+        price_progress=float(data["price_progress"]),
+        replenishment=float(data["replenishment"]),
+        sweep_distance=float(data["sweep_distance"]),
+        return_speed=float(data["return_speed"]),
+        post_sweep_absorption=float(data["post_sweep_absorption"]),
+        basis_z=float(data["basis_z"]),
+        lead_lag=float(data["lead_lag"]),
+        microprice=float(data["microprice"]),
+        mid=float(data["mid"]),
+    )
+
+
+def decode_record(record: dict) -> tuple[EventType, Any]:
+    event_type = EventType(record["event_type"])
+    data = record.get("data", {})
+    if event_type == EventType.BOOK_SNAPSHOT:
+        payload = BookSnapshot(
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            bids=_decode_book_levels(data.get("bids", [])),
+            asks=_decode_book_levels(data.get("asks", [])),
+            depth=int(data["depth"]),
+        )
+    elif event_type == EventType.BOOK_DELTA:
+        payload = BookDelta(
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            bids=_decode_book_levels(data.get("bids", [])),
+            asks=_decode_book_levels(data.get("asks", [])),
+            is_snapshot=bool(data.get("is_snapshot")),
+            update_id=data.get("update_id"),
+        )
+    elif event_type == EventType.TRADE:
+        payload = TradePrint(
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            price=float(data["price"]),
+            size=float(data["size"]),
+            aggressor_side=Side(data["aggressor_side"]),
+        )
+    elif event_type == EventType.QUOTE:
+        payload = QuoteTick(
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            bid=float(data["bid"]),
+            ask=float(data["ask"]),
+            last=float(data["last"]),
+        )
+    elif event_type == EventType.EVENT_SIGNAL:
+        payload = SignalEvent(
+            event_name=data["event_name"],
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            score_0_1=float(data["score_0_1"]),
+            reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.FEATURE:
+        payload = _decode_feature_frame(data)
+    elif event_type == EventType.TRADE_INTENT:
+        payload = TradeIntent(
+            symbol=data["symbol"],
+            direction=Side(data["direction"]),
+            score=float(data["score"]),
+            risk_frac=float(data["risk_frac"]),
+            entry_plan=dict(data.get("entry_plan", {})),
+            stop_plan=dict(data.get("stop_plan", {})),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
+        )
+    else:
+        payload = data
+    return event_type, payload
+
+
+class JournalWriter:
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._handle = open(self._path, "a", encoding="utf-8")
+
+    def append(self, event_type: EventType, payload: Any) -> None:
+        record = encode_record(event_type, payload)
+        line = json.dumps(record, separators=(",", ":"))
+        self._handle.write(line + "\n")
+        self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle:
+            self._handle.close()
+            self._handle = None
+
+
+def iter_records(path: str) -> Iterable[dict]:
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def iter_events(path: str) -> Iterable[tuple[EventType, Any]]:
+    for record in iter_records(path):
+        yield decode_record(record)
+
+===== END src/sublimine/core/journal.py =====
+
+===== BEGIN src/sublimine/core/replay.py =====
+from __future__ import annotations
+
+from typing import Iterable
+
+from sublimine.contracts.types import EventType
+from sublimine.core.bus import EventBus
+from sublimine.core.journal import iter_events
+
+
+class ReplayEngine:
+    def __init__(self, bus: EventBus, event_filter: set[EventType] | None = None) -> None:
+        self._bus = bus
+        self._event_filter = event_filter
+
+    def run(self, path: str) -> None:
+        for event_type, payload in iter_events(path):
+            if self._event_filter is not None and event_type not in self._event_filter:
+                continue
+            self._bus.publish(event_type, payload)
+
+
+def replay_events(bus: EventBus, events: Iterable[tuple[EventType, object]]) -> None:
+    for event_type, payload in events:
+        bus.publish(event_type, payload)
+
+===== END src/sublimine/core/replay.py =====
+
+===== BEGIN src/sublimine/contracts/types.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Literal
+
+
+class Venue(str, Enum):
+    BYBIT = "BYBIT"
+    BINANCE = "BINANCE"
+    MT5 = "MT5"
+    IBKR = "IBKR"
+
+
+class EventType(str, Enum):
+    QUOTE = "QUOTE"
+    BOOK_SNAPSHOT = "BOOK_SNAPSHOT"
+    BOOK_DELTA = "BOOK_DELTA"
+    TRADE = "TRADE"
+    FEATURE = "FEATURE"
+    EVENT_SIGNAL = "EVENT_SIGNAL"
+    TRADE_INTENT = "TRADE_INTENT"
+
+
+class Side(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class BookLevel:
+    price: float
+    size: float
+
+
+@dataclass(frozen=True)
+class BookSnapshot:
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    bids: list[BookLevel]
+    asks: list[BookLevel]
+    depth: int
+
+
+@dataclass(frozen=True)
+class BookDelta:
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    bids: list[BookLevel]
+    asks: list[BookLevel]
+    is_snapshot: bool
+    update_id: int | None
+
+
+@dataclass(frozen=True)
+class TradePrint:
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    price: float
+    size: float
+    aggressor_side: Side
+
+
+@dataclass(frozen=True)
+class QuoteTick:
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    bid: float
+    ask: float
+    last: float
+
+
+@dataclass(frozen=True)
+class SignalEvent:
+    event_name: Literal["E1", "E2", "E3", "E4"]
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    score_0_1: float
+    reason_codes: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TradeIntent:
+    symbol: str
+    direction: Side
+    score: float
+    risk_frac: float
+    entry_plan: dict
+    stop_plan: dict
+    ts_utc: datetime
+    reason_codes: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+
+===== END src/sublimine/contracts/types.py =====
+
+===== BEGIN tests/test_consensus_gates.py =====
+from datetime import datetime, timedelta, timezone
+
+from sublimine.config import EngineConfig, RiskConfig, RiskPhaseConfig, SymbolsConfig, ThresholdsConfig
+from sublimine.contracts.types import EventType, SignalEvent, Side, TradePrint, Venue
+from sublimine.core.bus import EventBus
+from sublimine.run import build_pipeline
+
+
+def _config(
+    *,
+    active_phase: str = "F0",
+    consensus_window_ms: int = 750,
+    max_stale_ms: int = 2000,
+) -> EngineConfig:
+    return EngineConfig(
+        symbols=SymbolsConfig(leader="BTCUSDT", exec_symbol="BTCUSD_CFD"),
+        thresholds=ThresholdsConfig(
+            window=5,
+            depth_k=1,
+            quantile_high=0.6,
+            quantile_low=0.4,
+            min_samples=2,
+            signal_score_min=0.2,
+            consensus_window_ms=consensus_window_ms,
+            max_stale_ms=max_stale_ms,
+        ),
+        risk=RiskConfig(
+            phases={
+                "F0": RiskPhaseConfig(risk_frac=0.001, max_daily_loss=0.01),
+                "F2": RiskPhaseConfig(risk_frac=0.003, max_daily_loss=0.015),
+            },
+            active_phase=active_phase,
+        ),
+    )
+
+
+def _seed_trades(bus: EventBus, ts: datetime) -> None:
+    bus.publish(
+        EventType.TRADE,
+        TradePrint(
+            symbol="BTCUSDT",
+            venue=Venue.BYBIT,
+            ts_utc=ts,
+            price=100.0,
+            size=0.1,
+            aggressor_side=Side.BUY,
+        ),
+    )
+    bus.publish(
+        EventType.TRADE,
+        TradePrint(
+            symbol="BTCUSDT",
+            venue=Venue.BINANCE,
+            ts_utc=ts,
+            price=100.1,
+            size=0.2,
+            aggressor_side=Side.BUY,
+        ),
+    )
+
+
+def _signal(venue: Venue, ts: datetime, score: float = 0.9) -> SignalEvent:
+    return SignalEvent(
+        event_name="E1",
+        symbol="BTCUSDT",
+        venue=venue,
+        ts_utc=ts,
+        score_0_1=score,
+        reason_codes=[],
+        meta={},
+    )
+
+
+def test_consensus_within_window_emits_intent():
+    bus = EventBus()
+    config = _config(consensus_window_ms=750, max_stale_ms=2000)
+    state = build_pipeline(bus, config=config)
+    ts0 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    _seed_trades(bus, ts0)
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BYBIT, ts0))
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BINANCE, ts0 + timedelta(milliseconds=500)))
+    assert len(state["intents"]) == 1
+
+
+def test_consensus_outside_window_blocks_intent():
+    bus = EventBus()
+    config = _config(consensus_window_ms=500, max_stale_ms=2000)
+    state = build_pipeline(bus, config=config)
+    ts0 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    _seed_trades(bus, ts0)
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BYBIT, ts0))
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BINANCE, ts0 + timedelta(milliseconds=1500)))
+    assert state["intents"] == []
+
+
+def test_consensus_requires_both_venues():
+    bus = EventBus()
+    config = _config()
+    state = build_pipeline(bus, config=config)
+    ts0 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    _seed_trades(bus, ts0)
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BYBIT, ts0))
+    assert state["intents"] == []
+
+
+def test_active_phase_sets_risk_frac():
+    bus = EventBus()
+    config = _config(active_phase="F2")
+    state = build_pipeline(bus, config=config)
+    ts0 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    _seed_trades(bus, ts0)
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BYBIT, ts0))
+    bus.publish(EventType.EVENT_SIGNAL, _signal(Venue.BINANCE, ts0))
+    assert len(state["intents"]) == 1
+    assert state["intents"][0].risk_frac == config.risk.phases["F2"].risk_frac
+
+===== END tests/test_consensus_gates.py =====
+
+===== BEGIN tests/test_live_mode_guard.py =====
+from sublimine.run import _allow_live_mode
+
+
+def test_live_mode_guard_blocks_pytest_env():
+    assert _allow_live_mode({"PYTEST_CURRENT_TEST": "test"}) is False
+    assert _allow_live_mode({}) is True
+
+===== END tests/test_live_mode_guard.py =====
+
+===== BEGIN tests/test_live_resync_policy.py =====
+from datetime import datetime, timezone
+
+from sublimine.contracts.types import BookLevel, BookSnapshot, Venue
+from sublimine.feeds.binance_ws import BinanceBookSynchronizer, parse_binance_diff_event
+from sublimine.feeds.ws_common import ReconnectPolicy
+
+
+def test_reconnect_policy_backoff_and_reset():
+    policy = ReconnectPolicy(base_delay=1.0, max_delay=5.0, factor=2.0)
+    assert policy.next_delay() == 1.0
+    assert policy.next_delay() == 2.0
+    assert policy.next_delay() == 4.0
+    assert policy.next_delay() == 5.0
+    policy.reset()
+    assert policy.next_delay() == 1.0
+
+
+def test_binance_snapshot_applies_buffered_deltas():
+    sync = BinanceBookSynchronizer(symbol="BTCUSDT", depth=2)
+    buffered_msg = {
+        "e": "depthUpdate",
+        "E": 1700000000000,
+        "s": "BTCUSDT",
+        "U": 95,
+        "u": 105,
+        "b": [["100", "2"]],
+        "a": [["101", "1"]],
+    }
+    buffered_event = parse_binance_diff_event(buffered_msg)
+    sync.on_diff_event(buffered_event)
+
+    snapshot = BookSnapshot(
+        symbol="BTCUSDT",
+        venue=Venue.BINANCE,
+        ts_utc=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        bids=[BookLevel(100.0, 1.0), BookLevel(99.0, 1.0)],
+        asks=[BookLevel(101.0, 1.0), BookLevel(102.0, 1.0)],
+        depth=2,
+    )
+    applied = sync.apply_snapshot(snapshot, last_update_id=100)
+    assert len(applied) == 1
+    assert applied[0].update_id == 105
+    assert sync.last_update_id == 105
+
+===== END tests/test_live_resync_policy.py =====
+
+===== BEGIN tests/test_replay_pipeline.py =====
+from datetime import datetime, timezone
+
+from sublimine.config import EngineConfig, RiskConfig, RiskPhaseConfig, SymbolsConfig, ThresholdsConfig
+from sublimine.contracts.types import EventType, SignalEvent, Side, TradePrint, Venue
+from sublimine.core.bus import EventBus
+from sublimine.core.replay import replay_events
+from sublimine.run import build_pipeline
+
+
+def test_replay_pipeline_triggers_intent():
+    config = EngineConfig(
+        symbols=SymbolsConfig(leader="BTCUSDT", exec_symbol="BTCUSD_CFD"),
+        thresholds=ThresholdsConfig(
+            window=5,
+            depth_k=1,
+            quantile_high=0.6,
+            quantile_low=0.4,
+            min_samples=2,
+            signal_score_min=0.1,
+            consensus_window_ms=750,
+            max_stale_ms=2000,
+        ),
+        risk=RiskConfig(phases={"F0": RiskPhaseConfig(risk_frac=0.002, max_daily_loss=0.01)}),
+    )
+
+    ts0 = datetime(2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    trade_bybit = TradePrint(
+        symbol="BTCUSDT",
+        venue=Venue.BYBIT,
+        ts_utc=ts0,
+        price=100.0,
+        size=0.1,
+        aggressor_side=Side.BUY,
+    )
+    trade_binance = TradePrint(
+        symbol="BTCUSDT",
+        venue=Venue.BINANCE,
+        ts_utc=ts0,
+        price=100.1,
+        size=0.2,
+        aggressor_side=Side.BUY,
+    )
+    signal_bybit = SignalEvent(
+        event_name="E1",
+        symbol="BTCUSDT",
+        venue=Venue.BYBIT,
+        ts_utc=ts0,
+        score_0_1=0.8,
+        reason_codes=[],
+        meta={},
+    )
+    signal_binance = SignalEvent(
+        event_name="E1",
+        symbol="BTCUSDT",
+        venue=Venue.BINANCE,
+        ts_utc=ts0,
+        score_0_1=0.8,
+        reason_codes=[],
+        meta={},
+    )
+
+    events = [
+        (EventType.TRADE, trade_bybit),
+        (EventType.TRADE, trade_binance),
+        (EventType.EVENT_SIGNAL, signal_bybit),
+        (EventType.EVENT_SIGNAL, signal_binance),
+    ]
+
+    bus = EventBus()
+    state = build_pipeline(bus, config=config)
+    replay_events(bus, events)
+
+    assert len(state["intents"]) == 1
+
+    bus2 = EventBus()
+    state2 = build_pipeline(bus2, config=config)
+    replay_events(bus2, events)
+
+    assert len(state2["intents"]) == 1
+    assert state2["intents"] == state["intents"]
+
+===== END tests/test_replay_pipeline.py =====

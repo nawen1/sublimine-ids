@@ -1,0 +1,5 @@
+﻿7b3a891 chore: ignore/remove audit bundles and temp dirs
+026dcf0 feat: Phase3 gates (active_phase + consensus + staleness)
+cf06c2f feat: shadow-live BTC (Bybit+Binance) + journaling + resync/backoff
+9ad2fb2 chore: ignore and clean temp dirs
+e9d9447 IDS v2.1 skeleton + P0 fixes (trim depth, binance resync)
