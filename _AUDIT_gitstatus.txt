@@ -1,4 +1,0 @@
-﻿?? _AUDIT_PHASE3.txt
-?? _AUDIT_gitlog.txt
-?? _AUDIT_gitstatus.txt
-?? _AUDIT_pytest.txt

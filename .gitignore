@@ -21,3 +21,14 @@ _audit_bundle*.txt
 __pycache__/
 *.pyc
 .pytest_cache/
+_AUDIT_*.txt
+_AUDIT_*.zip
+_audit_bundle*.txt
+_out/
+_tmp/
+.tmp/
+tests/_tmp/
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
