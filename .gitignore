@@ -13,3 +13,11 @@ _audit_bundle.txt
 
 *.egg-info/
 
+_out/
+_tmp/
+.tmp/
+_audit_bundle*.txt
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
