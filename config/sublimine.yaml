@@ -10,6 +10,36 @@ thresholds:
   signal_score_min: 0.2
   consensus_window_ms: 750
   max_stale_ms: 2000
+  bar_interval_ms: 500
+  dlv_pre_bars: 20
+  dlv_run_bars: 4
+  dlv_pause_bars: 2
+  dlv_max_overlap_ratio: 0.2
+  dlv_max_counter_wick_ratio: 0.25
+  dlv_max_close_off_ratio: 0.2
+  dlv_pause_range_ratio: 0.4
+  dlv_retest_tolerance_bps: 0.0
+  afs_pre_bars: 20
+  afs_sweep_bps: 10.0
+  afs_hold_bars_max: 3
+  afs_consol_range_ratio: 0.5
+  afs_followthrough_max_bps: 5.0
+  saf_level_bars: 20
+  saf_window_ms: 8000
+  saf_min_attacks: 4
+  saf_level_tolerance_bps: 10.0
+  saf_max_return_bps: 3.0
+  saf_min_replenishment: 0.5
+  saf_min_ofi_abs: 0.5
+  saf_reach_worsen_bps: 1.0
+  saf_ofi_decay_ratio: 0.7
+  per_ttl_bars: 30
+  per_min_hold_bps: 10.0
+  per_max_pullback_bps: 80.0
+  per_trigger_break: bar_break
+  rlb_window_ms: 10000
+  rlb_spike_bps: 15.0
+  max_mid_diff_bps: 25.0
 risk:
   active_phase: F0
 risk_phases:

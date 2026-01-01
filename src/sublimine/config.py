@@ -22,6 +22,36 @@ class ThresholdsConfig:
     signal_score_min: float
     consensus_window_ms: int
     max_stale_ms: int
+    bar_interval_ms: int = 500
+    dlv_pre_bars: int = 20
+    dlv_run_bars: int = 4
+    dlv_pause_bars: int = 2
+    dlv_max_overlap_ratio: float = 0.20
+    dlv_max_counter_wick_ratio: float = 0.25
+    dlv_max_close_off_ratio: float = 0.20
+    dlv_pause_range_ratio: float = 0.40
+    dlv_retest_tolerance_bps: float = 0.0
+    afs_pre_bars: int = 20
+    afs_sweep_bps: float = 10.0
+    afs_hold_bars_max: int = 3
+    afs_consol_range_ratio: float = 0.50
+    afs_followthrough_max_bps: float = 5.0
+    saf_level_bars: int = 20
+    saf_window_ms: int = 8000
+    saf_min_attacks: int = 4
+    saf_level_tolerance_bps: float = 10.0
+    saf_max_return_bps: float = 3.0
+    saf_min_replenishment: float = 0.5
+    saf_min_ofi_abs: float = 0.5
+    saf_reach_worsen_bps: float = 1.0
+    saf_ofi_decay_ratio: float = 0.7
+    per_ttl_bars: int = 30
+    per_min_hold_bps: float = 10.0
+    per_max_pullback_bps: float = 80.0
+    per_trigger_break: str = "bar_break"
+    rlb_window_ms: int = 10000
+    rlb_spike_bps: float = 15.0
+    max_mid_diff_bps: float = 25.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +114,36 @@ def load_config(path: str) -> EngineConfig:
         signal_score_min=float(_require(thresholds_raw, "signal_score_min")),
         consensus_window_ms=int(thresholds_raw.get("consensus_window_ms", 750)),
         max_stale_ms=int(thresholds_raw.get("max_stale_ms", 2000)),
+        bar_interval_ms=int(thresholds_raw.get("bar_interval_ms", 500)),
+        dlv_pre_bars=int(thresholds_raw.get("dlv_pre_bars", 20)),
+        dlv_run_bars=int(thresholds_raw.get("dlv_run_bars", 4)),
+        dlv_pause_bars=int(thresholds_raw.get("dlv_pause_bars", 2)),
+        dlv_max_overlap_ratio=float(thresholds_raw.get("dlv_max_overlap_ratio", 0.20)),
+        dlv_max_counter_wick_ratio=float(thresholds_raw.get("dlv_max_counter_wick_ratio", 0.25)),
+        dlv_max_close_off_ratio=float(thresholds_raw.get("dlv_max_close_off_ratio", 0.20)),
+        dlv_pause_range_ratio=float(thresholds_raw.get("dlv_pause_range_ratio", 0.40)),
+        dlv_retest_tolerance_bps=float(thresholds_raw.get("dlv_retest_tolerance_bps", 0.0)),
+        afs_pre_bars=int(thresholds_raw.get("afs_pre_bars", 20)),
+        afs_sweep_bps=float(thresholds_raw.get("afs_sweep_bps", 10.0)),
+        afs_hold_bars_max=int(thresholds_raw.get("afs_hold_bars_max", 3)),
+        afs_consol_range_ratio=float(thresholds_raw.get("afs_consol_range_ratio", 0.50)),
+        afs_followthrough_max_bps=float(thresholds_raw.get("afs_followthrough_max_bps", 5.0)),
+        saf_level_bars=int(thresholds_raw.get("saf_level_bars", 20)),
+        saf_window_ms=int(thresholds_raw.get("saf_window_ms", 8000)),
+        saf_min_attacks=int(thresholds_raw.get("saf_min_attacks", 4)),
+        saf_level_tolerance_bps=float(thresholds_raw.get("saf_level_tolerance_bps", 10.0)),
+        saf_max_return_bps=float(thresholds_raw.get("saf_max_return_bps", 3.0)),
+        saf_min_replenishment=float(thresholds_raw.get("saf_min_replenishment", 0.5)),
+        saf_min_ofi_abs=float(thresholds_raw.get("saf_min_ofi_abs", 0.5)),
+        saf_reach_worsen_bps=float(thresholds_raw.get("saf_reach_worsen_bps", 1.0)),
+        saf_ofi_decay_ratio=float(thresholds_raw.get("saf_ofi_decay_ratio", 0.7)),
+        per_ttl_bars=int(thresholds_raw.get("per_ttl_bars", 30)),
+        per_min_hold_bps=float(thresholds_raw.get("per_min_hold_bps", 10.0)),
+        per_max_pullback_bps=float(thresholds_raw.get("per_max_pullback_bps", 80.0)),
+        per_trigger_break=str(thresholds_raw.get("per_trigger_break", "bar_break")),
+        rlb_window_ms=int(thresholds_raw.get("rlb_window_ms", 10000)),
+        rlb_spike_bps=float(thresholds_raw.get("rlb_spike_bps", 15.0)),
+        max_mid_diff_bps=float(thresholds_raw.get("max_mid_diff_bps", 25.0)),
     )
 
     phases = {}

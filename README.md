@@ -43,6 +43,12 @@ pytest -q
 - `exec/`: MT5 adapter stub + router (shadow)
 - `live`: streaming runner + Bybit/Binance connectors (shadow)
 
+## Institutional Sequences (DLV/SAF/AFS/PER)
+
+- Primitive signals (E1..E4) are diagnostics only (`meta.actionable=False`).
+- Actionable setups run on deterministic microbar close (`thresholds.bar_interval_ms`) and emit `SignalEvent` with `meta.actionable=True`, `meta.setup`, `meta.direction`.
+- Setup → playbook event mapping: DLV→E1, SAF→E2, AFS→E3, PER→E1.
+
 ## Bybit/Binance book logic
 
 - **Bybit**: snapshot and delta parsing, size=0 removes level, `u==1` forces snapshot overwrite.

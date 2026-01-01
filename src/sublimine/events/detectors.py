@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
+from sublimine.config import ThresholdsConfig
 from sublimine.contracts.types import SignalEvent
+from sublimine.events.microbars import MicroBarBuilder
+from sublimine.events.setups import SetupEngine
 from sublimine.features.feature_engine import FeatureFrame
 
 
@@ -34,8 +37,9 @@ class DetectorConfig:
 
 
 class DetectorEngine:
-    def __init__(self, config: DetectorConfig) -> None:
+    def __init__(self, config: DetectorConfig, thresholds: ThresholdsConfig | None = None) -> None:
         self._config = config
+        self._thresholds = thresholds
         self._depth = RollingQuantile(config.window)
         self._ofi = RollingQuantile(config.window)
         self._bias = RollingQuantile(config.window)
@@ -47,8 +51,19 @@ class DetectorEngine:
         self._post_abs = RollingQuantile(config.window)
         self._basis = RollingQuantile(config.window)
         self._lead_lag = RollingQuantile(config.window)
+        bar_interval_ms = 500 if thresholds is None else thresholds.bar_interval_ms
+        self._microbars = MicroBarBuilder(bar_interval_ms=bar_interval_ms)
+        self._setups: SetupEngine | None = None
 
     def evaluate(self, frame: FeatureFrame) -> list[SignalEvent]:
+        signals: list[SignalEvent] = []
+
+        bar = self._microbars.update(frame)
+        if bar is not None and self._thresholds is not None:
+            if self._setups is None:
+                self._setups = SetupEngine(symbol=frame.symbol, venue=frame.venue, thresholds=self._thresholds)
+            signals.extend(self._setups.on_bar(bar))
+
         self._depth.update(frame.depth_near)
         self._ofi.update(frame.ofi_z)
         self._bias.update(frame.microprice_bias)
@@ -62,7 +77,7 @@ class DetectorEngine:
         self._lead_lag.update(frame.lead_lag)
 
         if not self._depth.ready(self._config.min_samples):
-            return []
+            return signals
 
         depth_low = self._depth.quantile(self._config.quantile_low)
         ofi_high = self._ofi.quantile(self._config.quantile_high)
@@ -76,7 +91,6 @@ class DetectorEngine:
         basis_high = self._basis.quantile(self._config.quantile_high)
         lead_lag_high = self._lead_lag.quantile(self._config.quantile_high)
 
-        signals: list[SignalEvent] = []
         if depth_low is not None and ofi_high is not None and bias_high is not None:
             if frame.depth_near <= depth_low and frame.ofi_z >= ofi_high and frame.microprice_bias >= bias_high:
                 score = _avg(
@@ -92,7 +106,13 @@ class DetectorEngine:
                         ts_utc=frame.ts_utc,
                         score_0_1=score,
                         reason_codes=["depth_near_low", "ofi_z_high", "microprice_bias_high"],
-                        meta={"depth_near": frame.depth_near, "ofi_z": frame.ofi_z, "microprice_bias": frame.microprice_bias},
+                        meta={
+                            "actionable": False,
+                            "primitive": True,
+                            "depth_near": frame.depth_near,
+                            "ofi_z": frame.ofi_z,
+                            "microprice_bias": frame.microprice_bias,
+                        },
                     )
                 )
 
@@ -111,7 +131,13 @@ class DetectorEngine:
                         ts_utc=frame.ts_utc,
                         score_0_1=score,
                         reason_codes=["delta_high", "price_progress_low", "replenishment_high"],
-                        meta={"delta_size": frame.delta_size, "price_progress": frame.price_progress, "replenishment": frame.replenishment},
+                        meta={
+                            "actionable": False,
+                            "primitive": True,
+                            "delta_size": frame.delta_size,
+                            "price_progress": frame.price_progress,
+                            "replenishment": frame.replenishment,
+                        },
                     )
                 )
 
@@ -131,6 +157,8 @@ class DetectorEngine:
                         score_0_1=score,
                         reason_codes=["sweep_distance_high", "return_speed_high", "post_sweep_absorption_high"],
                         meta={
+                            "actionable": False,
+                            "primitive": True,
                             "sweep_distance": frame.sweep_distance,
                             "return_speed": frame.return_speed,
                             "post_sweep_absorption": frame.post_sweep_absorption,
@@ -152,7 +180,7 @@ class DetectorEngine:
                         ts_utc=frame.ts_utc,
                         score_0_1=score,
                         reason_codes=["basis_z_extreme", "lead_lag_high"],
-                        meta={"basis_z": frame.basis_z, "lead_lag": frame.lead_lag},
+                        meta={"actionable": False, "primitive": True, "basis_z": frame.basis_z, "lead_lag": frame.lead_lag},
                     )
                 )
 

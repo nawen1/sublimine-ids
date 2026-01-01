@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta
 from dataclasses import replace
 from math import sqrt
 from pathlib import Path
@@ -22,6 +23,7 @@ from sublimine.live import LiveRunner
 from sublimine.risk.gates import RiskGates
 from sublimine.strategy.playbooks import BTCPlaybook
 from sublimine.events.detectors import DetectorConfig, DetectorEngine
+from sublimine.events.scoring import clamp_score
 
 
 def build_pipeline(
@@ -43,6 +45,8 @@ def build_pipeline(
     latest_signals: dict[Venue, SignalEvent] = {}
     last_book_ts: dict[Venue, datetime] = {}
     last_trade_ts: dict[Venue, datetime] = {}
+    last_mid: dict[Venue, tuple[datetime, float]] = {}
+    mid_diffs: deque[tuple[datetime, float]] = deque()
 
     def _feature_engine_for(venue: Venue) -> FeatureEngine:
         engine = feature_engines.get(venue)
@@ -64,7 +68,8 @@ def build_pipeline(
                     quantile_high=config.thresholds.quantile_high,
                     quantile_low=config.thresholds.quantile_low,
                     min_samples=config.thresholds.min_samples,
-                )
+                ),
+                thresholds=config.thresholds,
             )
             detectors[venue] = detector
         return detector
@@ -86,6 +91,17 @@ def build_pipeline(
         _feature_engine_for(trade.venue).on_trade(trade)
 
     def on_features(features: FeatureFrame) -> None:
+        last_mid[features.venue] = (features.ts_utc, features.mid)
+        if Venue.BYBIT in last_mid and Venue.BINANCE in last_mid:
+            bybit_mid = last_mid[Venue.BYBIT][1]
+            binance_mid = last_mid[Venue.BINANCE][1]
+            mid_avg = (bybit_mid + binance_mid) / 2.0
+            diff_bps = abs(bybit_mid - binance_mid) / max(mid_avg, 1e-12) * 10_000.0
+            mid_diffs.append((features.ts_utc, diff_bps))
+            cutoff = features.ts_utc - timedelta(milliseconds=config.thresholds.rlb_window_ms)
+            while mid_diffs and mid_diffs[0][0] < cutoff:
+                mid_diffs.popleft()
+
         detector = _detector_for(features.venue)
         for signal in detector.evaluate(features):
             bus.publish(EventType.EVENT_SIGNAL, signal)
@@ -110,6 +126,8 @@ def build_pipeline(
         return stale
 
     def on_signal(signal: SignalEvent) -> None:
+        if signal.meta.get("actionable") is False:
+            return
         if "stale_feed_block" in signal.reason_codes:
             return
         if signal.venue not in (Venue.BYBIT, Venue.BINANCE):
@@ -122,14 +140,37 @@ def build_pipeline(
             return
         if other.event_name != signal.event_name or other.symbol != signal.symbol:
             return
+        if signal.meta.get("setup") is not None or other.meta.get("setup") is not None:
+            if signal.meta.get("setup") != other.meta.get("setup"):
+                return
+        if signal.meta.get("direction") is not None and other.meta.get("direction") is not None:
+            if signal.meta.get("direction") != other.meta.get("direction"):
+                return
+
         dt_ms = abs((signal.ts_utc - other.ts_utc).total_seconds() * 1000.0)
         if dt_ms > config.thresholds.consensus_window_ms:
             return
+        ref_ts = signal.ts_utc if signal.ts_utc >= other.ts_utc else other.ts_utc
         combined_score = sqrt(max(signal.score_0_1, 0.0) * max(other.score_0_1, 0.0))
+        reason_codes = list(signal.reason_codes)
+
+        setup_tag = signal.meta.get("setup")
+        if setup_tag in {"SAF", "AFS"} and Venue.BYBIT in last_mid and Venue.BINANCE in last_mid and mid_diffs:
+            bybit_mid = last_mid[Venue.BYBIT][1]
+            binance_mid = last_mid[Venue.BINANCE][1]
+            mid_avg = (bybit_mid + binance_mid) / 2.0
+            current_diff_bps = abs(bybit_mid - binance_mid) / max(mid_avg, 1e-12) * 10_000.0
+            cutoff = ref_ts - timedelta(milliseconds=config.thresholds.rlb_window_ms)
+            recent = [diff for (ts, diff) in mid_diffs if cutoff <= ts <= ref_ts]
+            spike_recent = bool(recent) and max(recent) >= config.thresholds.rlb_spike_bps
+            now_aligned = current_diff_bps <= config.thresholds.max_mid_diff_bps
+            if spike_recent and now_aligned:
+                combined_score = clamp_score(combined_score * 1.10)
+                reason_codes.append("RLB_confirmed")
+
         if combined_score < config.thresholds.signal_score_min:
             return
 
-        ref_ts = signal.ts_utc if signal.ts_utc >= other.ts_utc else other.ts_utc
         stale = _stale_venues(ref_ts)
         if stale:
             blocked = SignalEvent(
@@ -138,7 +179,7 @@ def build_pipeline(
                 venue=signal.venue,
                 ts_utc=ref_ts,
                 score_0_1=combined_score,
-                reason_codes=list(signal.reason_codes) + ["stale_feed_block"],
+                reason_codes=reason_codes + ["stale_feed_block"],
                 meta={
                     "stale_venues": [venue.value for venue in stale],
                     "max_stale_ms": config.thresholds.max_stale_ms,
@@ -154,7 +195,7 @@ def build_pipeline(
             venue=signal.venue,
             ts_utc=ref_ts,
             score_0_1=combined_score,
-            reason_codes=list(signal.reason_codes) + ["consensus_confirmed"],
+            reason_codes=reason_codes + ["consensus_confirmed"],
             meta=dict(signal.meta),
         )
         active_phase = config.risk.active_phase
