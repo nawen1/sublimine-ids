@@ -13,6 +13,10 @@ from sublimine.contracts.types import (
     DataQualitySnapshot,
     EngineStateEvent,
     EventType,
+    OrderAck,
+    OrderFill,
+    OrderRequest,
+    PositionSnapshot,
     QuoteTick,
     SignalEvent,
     Side,
@@ -138,7 +142,48 @@ def decode_record(record: dict) -> tuple[EventType, Any]:
             entry_plan=dict(data.get("entry_plan", {})),
             stop_plan=dict(data.get("stop_plan", {})),
             ts_utc=_parse_datetime(data["ts_utc"]),
+            take_plan=dict(data.get("take_plan", {})),
             reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.ORDER_REQUEST:
+        payload = OrderRequest(
+            id=data["id"],
+            symbol=data["symbol"],
+            venue=Venue(data["venue"]),
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            side=Side(data["side"]),
+            order_type=str(data.get("order_type", "")),
+            price=float(data["price"]) if data.get("price") is not None else None,
+            qty=float(data.get("qty", 0.0)),
+            intent_id=str(data.get("intent_id", "")),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.ORDER_ACK:
+        payload = OrderAck(
+            request_id=data["request_id"],
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            status=str(data.get("status", "")),
+            reason=data.get("reason"),
+            order_id=str(data.get("order_id", "")),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.ORDER_FILL:
+        payload = OrderFill(
+            request_id=data["request_id"],
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            price=float(data.get("price", 0.0)),
+            qty=float(data.get("qty", 0.0)),
+            fee=float(data.get("fee", 0.0)),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.POSITION_SNAPSHOT:
+        payload = PositionSnapshot(
+            symbol=data["symbol"],
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            qty=float(data.get("qty", 0.0)),
+            avg_price=float(data.get("avg_price", 0.0)),
+            unrealized_pnl=float(data.get("unrealized_pnl", 0.0)),
             meta=dict(data.get("meta", {})),
         )
     elif event_type == EventType.DATA_QUALITY:

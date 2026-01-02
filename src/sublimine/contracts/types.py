@@ -21,6 +21,10 @@ class EventType(str, Enum):
     FEATURE = "FEATURE"
     EVENT_SIGNAL = "EVENT_SIGNAL"
     TRADE_INTENT = "TRADE_INTENT"
+    ORDER_REQUEST = "ORDER_REQUEST"
+    ORDER_ACK = "ORDER_ACK"
+    ORDER_FILL = "ORDER_FILL"
+    POSITION_SNAPSHOT = "POSITION_SNAPSHOT"
     DATA_QUALITY = "DATA_QUALITY"
     ENGINE_STATE = "ENGINE_STATE"
 
@@ -98,7 +102,52 @@ class TradeIntent:
     entry_plan: dict
     stop_plan: dict
     ts_utc: datetime
+    take_plan: dict = field(default_factory=dict)
     reason_codes: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OrderRequest:
+    id: str
+    symbol: str
+    venue: Venue
+    ts_utc: datetime
+    side: Side
+    order_type: str
+    price: float | None
+    qty: float
+    intent_id: str
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OrderAck:
+    request_id: str
+    ts_utc: datetime
+    status: str
+    reason: str | None
+    order_id: str
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OrderFill:
+    request_id: str
+    ts_utc: datetime
+    price: float
+    qty: float
+    fee: float
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PositionSnapshot:
+    symbol: str
+    ts_utc: datetime
+    qty: float
+    avg_price: float
+    unrealized_pnl: float
     meta: dict = field(default_factory=dict)
 
 

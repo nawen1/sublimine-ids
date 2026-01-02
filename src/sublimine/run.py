@@ -14,7 +14,8 @@ from sublimine.core.bus import EventBus
 from sublimine.core.clock import utc_now
 from sublimine.core.journal import JournalWriter
 from sublimine.core.replay import ReplayEngine
-from sublimine.exec.mt5_adapter import MockMT5Adapter
+from sublimine.exec.mt5_adapter import MockMT5Adapter, PaperAdapter
+from sublimine.exec.oms import OMS
 from sublimine.exec.router import OrderRouter
 from sublimine.features import FeatureEngine, FeatureFrame
 from sublimine.feeds.binance_ws import BinanceConnector
@@ -32,6 +33,7 @@ def build_pipeline(
     config_path: str | None = None,
     config: EngineConfig | None = None,
     shadow: bool = True,
+    exec_router: OrderRouter | None = None,
 ) -> dict:
     if config is None:
         if config_path is None:
@@ -41,7 +43,20 @@ def build_pipeline(
     detectors: dict[Venue, DetectorEngine] = {}
     playbook = BTCPlaybook(exec_symbol=config.symbols.exec)
     risk_gates = RiskGates()
-    router = OrderRouter(adapter=MockMT5Adapter(), shadow=shadow)
+    if exec_router is None:
+        oms = OMS(
+            venue=Venue.MT5,
+            equity=1000.0,
+            tick_size=1.0,
+            tick_value_per_lot=1.0,
+            vol_min=0.01,
+            vol_step=0.01,
+        )
+        router = OrderRouter(adapter=MockMT5Adapter(), oms=oms, bus=bus, shadow=shadow)
+    else:
+        exec_router.shadow = shadow
+        exec_router.bus = bus
+        router = exec_router
     health = HealthMonitor(config.thresholds)
     guard = EngineGuard(config.thresholds)
     intents: list = []
@@ -269,6 +284,10 @@ def _attach_journal(bus: EventBus, writer: JournalWriter) -> None:
         EventType.FEATURE,
         EventType.EVENT_SIGNAL,
         EventType.TRADE_INTENT,
+        EventType.ORDER_REQUEST,
+        EventType.ORDER_ACK,
+        EventType.ORDER_FILL,
+        EventType.POSITION_SNAPSHOT,
         EventType.DATA_QUALITY,
         EventType.ENGINE_STATE,
     ):
@@ -295,16 +314,30 @@ def _allow_live_mode(env: dict[str, str] | None = None) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SUBLIMINE IDS v2.1")
-    parser.add_argument("--mode", choices=["shadow", "replay", "shadow-live"], default="shadow")
+    parser.add_argument("--mode", choices=["shadow", "replay", "shadow-live", "paper-exec"], default="shadow")
     parser.add_argument("--config", required=True)
     parser.add_argument("--replay")
     args = parser.parse_args()
 
-    if args.mode in {"shadow", "replay"}:
+    if args.mode in {"shadow", "replay", "paper-exec"}:
         if not args.replay:
-            parser.error("--replay is required for shadow/replay mode")
+            parser.error("--replay is required for shadow/replay/paper-exec mode")
         bus = EventBus()
-        pipeline_state = build_pipeline(bus, config_path=args.config, shadow=True)
+        config = load_config(args.config)
+        exec_router = None
+        shadow = True
+        if args.mode == "paper-exec":
+            oms = OMS(
+                venue=Venue.MT5,
+                equity=1000.0,
+                tick_size=1.0,
+                tick_value_per_lot=1.0,
+                vol_min=0.01,
+                vol_step=0.01,
+            )
+            exec_router = OrderRouter(adapter=PaperAdapter(), oms=oms, bus=bus, shadow=False)
+            shadow = False
+        pipeline_state = build_pipeline(bus, config=config, shadow=shadow, exec_router=exec_router)
         replay = ReplayEngine(
             bus,
             event_filter={EventType.BOOK_SNAPSHOT, EventType.BOOK_DELTA, EventType.TRADE, EventType.QUOTE},
