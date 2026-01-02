@@ -56,6 +56,19 @@ class ThresholdsConfig:
     rlb_window_ms: int = 10000
     rlb_spike_bps: float = 15.0
     max_mid_diff_bps: float = 25.0
+    health_eps_window_ms: int = 5000
+    health_rate_window_ms: int = 60000
+    health_min_eps: float = 5.0
+    health_max_resync_per_min: float = 6.0
+    health_max_desync_per_min: float = 6.0
+    health_max_gaps_in_window: int = 3
+    health_max_queue_depth: int = 5000
+    health_degraded_score: float = 0.85
+    health_freeze_score: float = 0.60
+    health_kill_score: float = 0.30
+    health_recover_score: float = 0.90
+    health_recover_window_ms: int = 5000
+    health_risk_scale_degraded: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -148,6 +161,19 @@ def load_config(path: str) -> EngineConfig:
         rlb_window_ms=int(thresholds_raw.get("rlb_window_ms", 10000)),
         rlb_spike_bps=float(thresholds_raw.get("rlb_spike_bps", 15.0)),
         max_mid_diff_bps=float(thresholds_raw.get("max_mid_diff_bps", 25.0)),
+        health_eps_window_ms=int(thresholds_raw.get("health_eps_window_ms", 5000)),
+        health_rate_window_ms=int(thresholds_raw.get("health_rate_window_ms", 60000)),
+        health_min_eps=float(thresholds_raw.get("health_min_eps", 5.0)),
+        health_max_resync_per_min=float(thresholds_raw.get("health_max_resync_per_min", 6.0)),
+        health_max_desync_per_min=float(thresholds_raw.get("health_max_desync_per_min", 6.0)),
+        health_max_gaps_in_window=int(thresholds_raw.get("health_max_gaps_in_window", 3)),
+        health_max_queue_depth=int(thresholds_raw.get("health_max_queue_depth", 5000)),
+        health_degraded_score=float(thresholds_raw.get("health_degraded_score", 0.85)),
+        health_freeze_score=float(thresholds_raw.get("health_freeze_score", 0.60)),
+        health_kill_score=float(thresholds_raw.get("health_kill_score", 0.30)),
+        health_recover_score=float(thresholds_raw.get("health_recover_score", 0.90)),
+        health_recover_window_ms=int(thresholds_raw.get("health_recover_window_ms", 5000)),
+        health_risk_scale_degraded=float(thresholds_raw.get("health_risk_scale_degraded", 0.50)),
     )
 
     phases = {}

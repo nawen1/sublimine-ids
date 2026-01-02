@@ -43,6 +43,14 @@ pytest -q
 - `exec/`: MT5 adapter stub + router (shadow)
 - `live`: streaming runner + Bybit/Binance connectors (shadow)
 
+## Institutional Gates (Health + Alignment + Kill-Switch)
+
+- TradeIntent requires multi-venue consensus, alignment (`mid_diff_bps <= thresholds.max_mid_diff_bps` with fresh mids), and health gates.
+- Health scoring checks staleness, eps, resync/desync rate, gap counts, and queue depth and emits `DATA_QUALITY`.
+- EngineGuard transitions emit `ENGINE_STATE` and allow trading only in RUN/DEGRADED (FREEZE/KILL block; KILL latches).
+- Risk is scaled in DEGRADED by `thresholds.health_risk_scale_degraded`.
+- Audit journals for `DATA_QUALITY` and `ENGINE_STATE` records in the jsonl output.
+
 ## Institutional Sequences (DLV/SAF/AFS/PER)
 
 - Primitive signals (E1..E4) are diagnostics only (`meta.actionable=False`).

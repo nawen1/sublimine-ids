@@ -23,6 +23,7 @@ def _config(
             signal_score_min=0.2,
             consensus_window_ms=consensus_window_ms,
             max_stale_ms=max_stale_ms,
+            health_min_eps=0.0,
         ),
         risk=RiskConfig(
             phases={

@@ -21,6 +21,8 @@ class EventType(str, Enum):
     FEATURE = "FEATURE"
     EVENT_SIGNAL = "EVENT_SIGNAL"
     TRADE_INTENT = "TRADE_INTENT"
+    DATA_QUALITY = "DATA_QUALITY"
+    ENGINE_STATE = "ENGINE_STATE"
 
 
 class Side(str, Enum):
@@ -98,3 +100,7 @@ class TradeIntent:
     ts_utc: datetime
     reason_codes: list[str] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
+
+
+from sublimine.health.health import DataQualitySnapshot
+from sublimine.health.state import EngineStateEvent

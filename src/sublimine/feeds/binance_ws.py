@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 from datetime import datetime, timezone
 import json
 import threading
@@ -210,6 +211,12 @@ class BinanceConnector:
     _ws: websocket.WebSocketApp | None = field(init=False, default=None)
     _sync_lock: threading.Lock = field(init=False, default_factory=threading.Lock)
     _resync_lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+    _health_lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+    _resync_events: deque[datetime] = field(init=False, default_factory=deque)
+    _desync_events: deque[datetime] = field(init=False, default_factory=deque)
+    _resync_count: int = field(init=False, default=0)
+    _desync_count: int = field(init=False, default=0)
+    _desync_reported: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self._sync = BinanceBookSynchronizer(symbol=self.symbol, depth=self.depth)
@@ -229,6 +236,24 @@ class BinanceConnector:
     def join(self, timeout: float | None = None) -> None:
         if self._thread is not None:
             self._thread.join(timeout)
+
+    @property
+    def resync_count(self) -> int:
+        with self._health_lock:
+            return self._resync_count
+
+    @property
+    def desync_count(self) -> int:
+        with self._health_lock:
+            return self._desync_count
+
+    def drain_health_events(self) -> tuple[list[datetime], list[datetime]]:
+        with self._health_lock:
+            resync_events = list(self._resync_events)
+            desync_events = list(self._desync_events)
+            self._resync_events.clear()
+            self._desync_events.clear()
+        return resync_events, desync_events
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -279,6 +304,7 @@ class BinanceConnector:
         if applied:
             self._sink(EventType.BOOK_DELTA, diff_event.delta)
         if needs_resync:
+            self._record_desync_resync(diff_event.ts_utc)
             self._request_resync()
 
     def _request_resync(self) -> None:
@@ -303,6 +329,8 @@ class BinanceConnector:
                 for delta in buffered:
                     self._sink(EventType.BOOK_DELTA, delta)
         finally:
+            with self._health_lock:
+                self._desync_reported = False
             self._resync_lock.release()
 
     def _fetch_snapshot_with_backoff(self) -> tuple[BookSnapshot, int]:
@@ -321,3 +349,13 @@ class BinanceConnector:
 
     def _on_close(self, _ws: websocket.WebSocketApp, _status: object, _msg: object) -> None:
         return None
+
+    def _record_desync_resync(self, ts_utc: datetime) -> None:
+        with self._health_lock:
+            if self._desync_reported:
+                return
+            self._desync_reported = True
+            self._desync_count += 1
+            self._resync_count += 1
+            self._desync_events.append(ts_utc)
+            self._resync_events.append(ts_utc)

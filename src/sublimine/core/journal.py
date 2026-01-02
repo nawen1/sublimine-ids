@@ -10,6 +10,8 @@ from sublimine.contracts.types import (
     BookDelta,
     BookLevel,
     BookSnapshot,
+    DataQualitySnapshot,
+    EngineStateEvent,
     EventType,
     QuoteTick,
     SignalEvent,
@@ -136,6 +138,27 @@ def decode_record(record: dict) -> tuple[EventType, Any]:
             entry_plan=dict(data.get("entry_plan", {})),
             stop_plan=dict(data.get("stop_plan", {})),
             ts_utc=_parse_datetime(data["ts_utc"]),
+            reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.DATA_QUALITY:
+        payload = DataQualitySnapshot(
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            symbol=data["symbol"],
+            per_venue=dict(data.get("per_venue", {})),
+            queue_depth=int(data.get("queue_depth", 0)),
+            mid_by_venue={key: float(val) for key, val in data.get("mid_by_venue", {}).items()},
+            mid_diff_bps=float(data["mid_diff_bps"]) if data.get("mid_diff_bps") is not None else None,
+            score_0_1=float(data.get("score_0_1", 0.0)),
+            reason_codes=list(data.get("reason_codes", [])),
+            meta=dict(data.get("meta", {})),
+        )
+    elif event_type == EventType.ENGINE_STATE:
+        payload = EngineStateEvent(
+            ts_utc=_parse_datetime(data["ts_utc"]),
+            state=str(data.get("state", "")),
+            prev_state=str(data.get("prev_state", "")),
+            score_0_1=float(data.get("score_0_1", 0.0)),
             reason_codes=list(data.get("reason_codes", [])),
             meta=dict(data.get("meta", {})),
         )

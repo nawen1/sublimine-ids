@@ -45,5 +45,8 @@ $bundleOut = Join-Path $stage "bundle.txt"
 $zipPath = Join-Path $repoRoot ("_AUDIT_" + $ts + ".zip")
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zipPath -Force
 
-Write-Host ("Wrote " + $zipPath)
+if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
+  Set-Clipboard -Value $zipPath
+}
 
+Write-Host ("Wrote " + $zipPath)

@@ -19,6 +19,7 @@ from sublimine.exec.router import OrderRouter
 from sublimine.features import FeatureEngine, FeatureFrame
 from sublimine.feeds.binance_ws import BinanceConnector
 from sublimine.feeds.bybit_ws import BybitConnector
+from sublimine.health import EngineGuard, EngineState, HealthMonitor
 from sublimine.live import LiveRunner
 from sublimine.risk.gates import RiskGates
 from sublimine.strategy.playbooks import BTCPlaybook
@@ -41,10 +42,10 @@ def build_pipeline(
     playbook = BTCPlaybook(exec_symbol=config.symbols.exec)
     risk_gates = RiskGates()
     router = OrderRouter(adapter=MockMT5Adapter(), shadow=shadow)
+    health = HealthMonitor(config.thresholds)
+    guard = EngineGuard(config.thresholds)
     intents: list = []
     latest_signals: dict[Venue, SignalEvent] = {}
-    last_book_ts: dict[Venue, datetime] = {}
-    last_trade_ts: dict[Venue, datetime] = {}
     last_mid: dict[Venue, tuple[datetime, float]] = {}
     mid_diffs: deque[tuple[datetime, float]] = deque()
 
@@ -75,22 +76,23 @@ def build_pipeline(
         return detector
 
     def on_snapshot(snapshot) -> None:
-        last_book_ts[snapshot.venue] = snapshot.ts_utc
+        health.observe_book(snapshot.venue, snapshot.ts_utc)
         features = _feature_engine_for(snapshot.venue).on_book_snapshot(snapshot)
         if features:
             bus.publish(EventType.FEATURE, features)
 
     def on_delta(delta) -> None:
-        last_book_ts[delta.venue] = delta.ts_utc
+        health.observe_book(delta.venue, delta.ts_utc)
         features = _feature_engine_for(delta.venue).on_book_delta(delta)
         if features:
             bus.publish(EventType.FEATURE, features)
 
     def on_trade(trade) -> None:
-        last_trade_ts[trade.venue] = trade.ts_utc
+        health.observe_trade(trade.venue, trade.ts_utc, price=getattr(trade, "price", None))
         _feature_engine_for(trade.venue).on_trade(trade)
 
     def on_features(features: FeatureFrame) -> None:
+        health.observe_feature(features.venue, features.ts_utc, features.mid)
         last_mid[features.venue] = (features.ts_utc, features.mid)
         if Venue.BYBIT in last_mid and Venue.BINANCE in last_mid:
             bybit_mid = last_mid[Venue.BYBIT][1]
@@ -106,25 +108,6 @@ def build_pipeline(
         for signal in detector.evaluate(features):
             bus.publish(EventType.EVENT_SIGNAL, signal)
 
-    def _last_seen_ts(venue: Venue) -> datetime | None:
-        book_ts = last_book_ts.get(venue)
-        trade_ts = last_trade_ts.get(venue)
-        if book_ts is not None and trade_ts is not None:
-            return max(book_ts, trade_ts)
-        return book_ts or trade_ts
-
-    def _stale_venues(ref_ts: datetime) -> list[Venue]:
-        stale: list[Venue] = []
-        for venue in (Venue.BYBIT, Venue.BINANCE):
-            last_ts = _last_seen_ts(venue)
-            if last_ts is None:
-                stale.append(venue)
-                continue
-            age_ms = max((ref_ts - last_ts).total_seconds() * 1000.0, 0.0)
-            if age_ms > config.thresholds.max_stale_ms:
-                stale.append(venue)
-        return stale
-
     def _merge_reason_codes(*groups: list[str]) -> list[str]:
         merged: list[str] = []
         for group in groups:
@@ -134,7 +117,11 @@ def build_pipeline(
     def on_signal(signal: SignalEvent) -> None:
         if signal.meta.get("actionable") is False:
             return
-        if "stale_feed_block" in signal.reason_codes:
+        if signal.meta.get("blocked_by_engine_state") is not None:
+            return
+        if "blocked_by_engine_state" in signal.reason_codes:
+            return
+        if any(code in signal.reason_codes for code in ("stale_feed_block", "engine_freeze_block", "engine_kill_block")):
             return
         if signal.venue not in (Venue.BYBIT, Venue.BINANCE):
             return
@@ -177,22 +164,37 @@ def build_pipeline(
         if combined_score < config.thresholds.signal_score_min:
             return
 
-        stale = _stale_venues(ref_ts)
-        if stale:
+        snap = health.snapshot(symbol=signal.symbol, ref_ts=ref_ts)
+        bus.publish(EventType.DATA_QUALITY, snap)
+        state_event = guard.update(snap)
+        if state_event is not None:
+            bus.publish(EventType.ENGINE_STATE, state_event)
+        if guard.current_state in {EngineState.FREEZE, EngineState.KILL}:
+            block_reason = "engine_freeze_block" if guard.current_state == EngineState.FREEZE else "engine_kill_block"
+            blocked_meta = dict(signal.meta)
+            blocked_meta.update(
+                {
+                    "consensus_dt_ms": dt_ms,
+                    "health_state": guard.current_state.value,
+                    "health_score": snap.score_0_1,
+                    "health_reasons": list(snap.reason_codes),
+                    "mid_diff_bps": snap.mid_diff_bps,
+                    "queue_depth": snap.queue_depth,
+                    "blocked_by_engine_state": True,
+                }
+            )
             blocked = SignalEvent(
                 event_name=signal.event_name,
                 symbol=signal.symbol,
                 venue=signal.venue,
                 ts_utc=ref_ts,
                 score_0_1=combined_score,
-                reason_codes=reason_codes + ["stale_feed_block"],
-                meta={
-                    "stale_venues": [venue.value for venue in stale],
-                    "max_stale_ms": config.thresholds.max_stale_ms,
-                    "consensus_dt_ms": dt_ms,
-                },
+                reason_codes=reason_codes + ["blocked_by_engine_state", block_reason],
+                meta=blocked_meta,
             )
             bus.publish(EventType.EVENT_SIGNAL, blocked)
+            return
+        if snap.score_0_1 <= 0.0:
             return
 
         consensus_signal = SignalEvent(
@@ -206,6 +208,8 @@ def build_pipeline(
         )
         active_phase = config.risk.active_phase
         risk_frac = config.risk.phases[active_phase].risk_frac
+        if guard.current_state == EngineState.DEGRADED:
+            risk_frac *= config.thresholds.health_risk_scale_degraded
         intent = playbook.on_signal(consensus_signal, risk_frac)
         if intent is None:
             return
@@ -224,6 +228,13 @@ def build_pipeline(
             if key in consensus_signal.meta:
                 merged_meta[key] = consensus_signal.meta[key]
         merged_meta["consensus"] = consensus_meta
+        merged_meta["health"] = {
+            "state": guard.current_state.value,
+            "score_0_1": snap.score_0_1,
+            "reasons": list(snap.reason_codes),
+            "mid_diff_bps": snap.mid_diff_bps,
+            "queue_depth": snap.queue_depth,
+        }
         intent = replace(
             intent,
             score=combined_score,
@@ -241,7 +252,7 @@ def build_pipeline(
     bus.subscribe(EventType.FEATURE, on_features)
     bus.subscribe(EventType.EVENT_SIGNAL, on_signal)
 
-    return {"config": config, "intents": intents}
+    return {"config": config, "intents": intents, "health": health, "guard": guard}
 
 
 def _attach_journal(bus: EventBus, writer: JournalWriter) -> None:
@@ -258,6 +269,8 @@ def _attach_journal(bus: EventBus, writer: JournalWriter) -> None:
         EventType.FEATURE,
         EventType.EVENT_SIGNAL,
         EventType.TRADE_INTENT,
+        EventType.DATA_QUALITY,
+        EventType.ENGINE_STATE,
     ):
         bus.subscribe(event_type, _record(event_type))
 
@@ -306,6 +319,7 @@ def main() -> None:
     bus = EventBus()
     pipeline_state = build_pipeline(bus, config_path=args.config, shadow=True)
     config = pipeline_state["config"]
+    health = pipeline_state.get("health")
     live = _require_live_config(config.live)
     journal_path = _live_journal_path(config)
     Path(journal_path).parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +335,20 @@ def main() -> None:
             rest_url=live.binance_rest,
         ),
     ]
-    runner = LiveRunner(bus, connectors)
+
+    def _on_tick() -> None:
+        if health is None:
+            return
+        health.set_queue_depth(runner.queue_depth())
+        for connector in connectors:
+            if isinstance(connector, BinanceConnector):
+                resync_events, desync_events = connector.drain_health_events()
+                for ts in desync_events:
+                    health.observe_desync(Venue.BINANCE, ts)
+                for ts in resync_events:
+                    health.observe_resync(Venue.BINANCE, ts)
+
+    runner = LiveRunner(bus, connectors, on_tick=_on_tick)
     try:
         runner.run()
     except KeyboardInterrupt:

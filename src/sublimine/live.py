@@ -19,11 +19,17 @@ class LiveEvent:
 
 
 class LiveRunner:
-    def __init__(self, bus: EventBus, connectors: Iterable[object]) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        connectors: Iterable[object],
+        on_tick: Callable[[], None] | None = None,
+    ) -> None:
         self._bus = bus
         self._connectors = list(connectors)
         self._queue: queue.Queue[LiveEvent] = queue.Queue()
         self._stop_event = threading.Event()
+        self._on_tick = on_tick
 
     @property
     def sink(self) -> EventSink:
@@ -37,6 +43,8 @@ class LiveRunner:
             connector.start(self.sink)
         try:
             while not self._stop_event.is_set():
+                if self._on_tick is not None:
+                    self._on_tick()
                 try:
                     event = self._queue.get(timeout=0.5)
                 except queue.Empty:
@@ -44,6 +52,9 @@ class LiveRunner:
                 self._bus.publish(event.event_type, event.payload)
         finally:
             self.stop()
+
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
 
     def stop(self) -> None:
         self._stop_event.set()

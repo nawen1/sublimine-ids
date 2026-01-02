@@ -40,6 +40,19 @@ thresholds:
   rlb_window_ms: 10000
   rlb_spike_bps: 15.0
   max_mid_diff_bps: 25.0
+  health_eps_window_ms: 5000
+  health_rate_window_ms: 60000
+  health_min_eps: 5.0
+  health_max_resync_per_min: 6.0
+  health_max_desync_per_min: 6.0
+  health_max_gaps_in_window: 3
+  health_max_queue_depth: 5000
+  health_degraded_score: 0.85
+  health_freeze_score: 0.6
+  health_kill_score: 0.3
+  health_recover_score: 0.9
+  health_recover_window_ms: 5000
+  health_risk_scale_degraded: 0.5
 risk:
   active_phase: F0
 risk_phases:

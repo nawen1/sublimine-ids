@@ -18,6 +18,7 @@ def _config(*, consensus_window_ms: int = 750, max_stale_ms: int = 2000) -> Engi
             signal_score_min=0.2,
             consensus_window_ms=consensus_window_ms,
             max_stale_ms=max_stale_ms,
+            health_min_eps=0.0,
         ),
         risk=RiskConfig(phases={"F0": RiskPhaseConfig(risk_frac=0.001, max_daily_loss=0.01)}),
     )
@@ -100,4 +101,3 @@ def test_playbook_routes_per_sell_by_meta_direction():
     assert intent.meta.get("direction") == "SELL"
     assert "PER" in intent.reason_codes
     assert "consensus_confirmed" in intent.reason_codes
-

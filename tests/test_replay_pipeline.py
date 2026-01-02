@@ -19,6 +19,7 @@ def test_replay_pipeline_triggers_intent():
             signal_score_min=0.1,
             consensus_window_ms=750,
             max_stale_ms=2000,
+            health_min_eps=0.0,
         ),
         risk=RiskConfig(phases={"F0": RiskPhaseConfig(risk_frac=0.002, max_daily_loss=0.01)}),
     )
