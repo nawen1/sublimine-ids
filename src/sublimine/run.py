@@ -38,7 +38,7 @@ def build_pipeline(
         config = load_config(config_path)
     feature_engines: dict[Venue, FeatureEngine] = {}
     detectors: dict[Venue, DetectorEngine] = {}
-    playbook = BTCPlaybook()
+    playbook = BTCPlaybook(exec_symbol=config.symbols.exec)
     risk_gates = RiskGates()
     router = OrderRouter(adapter=MockMT5Adapter(), shadow=shadow)
     intents: list = []
@@ -125,6 +125,12 @@ def build_pipeline(
                 stale.append(venue)
         return stale
 
+    def _merge_reason_codes(*groups: list[str]) -> list[str]:
+        merged: list[str] = []
+        for group in groups:
+            merged.extend(code for code in group if isinstance(code, str))
+        return list(dict.fromkeys(merged))
+
     def on_signal(signal: SignalEvent) -> None:
         if signal.meta.get("actionable") is False:
             return
@@ -206,16 +212,24 @@ def build_pipeline(
         if not risk_gates.allow_trade(intent.ts_utc):
             return
         risk_gates.record_trade(intent.ts_utc)
+        scores_by_venue = {signal.venue: signal.score_0_1, other.venue: other.score_0_1}
+        consensus_meta = {
+            "venues": [venue.value for venue in (Venue.BYBIT, Venue.BINANCE) if venue in scores_by_venue],
+            "scores": {venue.value: scores_by_venue[venue] for venue in (Venue.BYBIT, Venue.BINANCE) if venue in scores_by_venue},
+            "dt_ms": dt_ms,
+        }
+        merged_meta = dict(consensus_signal.meta)
+        merged_meta.update(intent.meta)
+        for key in ("setup", "direction"):
+            if key in consensus_signal.meta:
+                merged_meta[key] = consensus_signal.meta[key]
+        merged_meta["consensus"] = consensus_meta
         intent = replace(
             intent,
             score=combined_score,
             risk_frac=risk_frac,
-            reason_codes=["consensus_confirmed"],
-            meta={
-                "venues": [signal.venue.value, other.venue.value],
-                "scores": {signal.venue.value: signal.score_0_1, other.venue.value: other.score_0_1},
-                "consensus_dt_ms": dt_ms,
-            },
+            reason_codes=_merge_reason_codes(consensus_signal.reason_codes, intent.reason_codes),
+            meta=merged_meta,
         )
         router.submit(intent)
         intents.append(intent)

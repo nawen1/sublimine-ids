@@ -40,7 +40,13 @@ def main() -> int:
         "pyproject.toml",
         "config/sublimine.yaml",
         "src/sublimine/config.py",
+        "src/sublimine/contracts/types.py",
+        "src/sublimine/core/journal.py",
+        "src/sublimine/core/replay.py",
+        "src/sublimine/exec/mt5_adapter.py",
+        "src/sublimine/exec/router.py",
         "src/sublimine/run.py",
+        "src/sublimine/strategy/playbooks.py",
         "src/sublimine/events/detectors.py",
         "src/sublimine/events/microbars.py",
         "src/sublimine/events/setups.py",
@@ -49,6 +55,7 @@ def main() -> int:
         "tests/test_setups_saf.py",
         "tests/test_setups_afs.py",
         "tests/test_setups_per.py",
+        "tests/test_playbook_direction_routing.py",
     ]
 
     parts: list[str] = []
@@ -67,4 +74,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

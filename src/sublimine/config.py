@@ -11,6 +11,10 @@ class SymbolsConfig:
     leader: str
     exec_symbol: str
 
+    @property
+    def exec(self) -> str:
+        return self.exec_symbol
+
 
 @dataclass(frozen=True)
 class ThresholdsConfig:

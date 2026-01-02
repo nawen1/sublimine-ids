@@ -7,17 +7,25 @@ from sublimine.contracts.types import SignalEvent, Side, TradeIntent
 
 @dataclass
 class BTCPlaybook:
+    exec_symbol: str = "BTCUSD_CFD"
+
     def on_signal(self, signal: SignalEvent, risk_frac: float) -> TradeIntent | None:
         if signal.event_name not in {"E1", "E2", "E3", "E4"}:
             return None
 
-        direction = Side.BUY
-        bias = signal.meta.get("microprice_bias")
-        if isinstance(bias, (int, float)) and bias < 0:
-            direction = Side.SELL
+        direction_meta = signal.meta.get("direction")
+        if isinstance(direction_meta, Side):
+            direction = direction_meta
+        elif isinstance(direction_meta, str) and direction_meta.strip().upper() in {"BUY", "SELL"}:
+            direction = Side(direction_meta.strip().upper())
+        else:
+            direction = Side.BUY
+            bias = signal.meta.get("microprice_bias")
+            if isinstance(bias, (int, float)) and bias < 0:
+                direction = Side.SELL
 
         return TradeIntent(
-            symbol=signal.symbol,
+            symbol=self.exec_symbol,
             direction=direction,
             score=signal.score_0_1,
             risk_frac=risk_frac,
